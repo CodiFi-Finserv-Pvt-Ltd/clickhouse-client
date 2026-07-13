@@ -7,26 +7,18 @@ import org.slf4j.LoggerFactory;
 
 import in.codifi.clickhouse.logs.model.AccessLogModel;
 import in.codifi.clickhouse.logs.model.RestAccessLogModel;
-import in.codifi.clickhouse.logs.util.CommonUtils;
 
 /**
  * Public entry point for the codifi-clickhouse-logs-core library.
  *
  * <p>Usage:
  * <pre>
- *   ClickHouseAccessLogger logger = new ClickHouseAccessLogger(dataSource, 5);
+ *   ClickHouseAccessLogger logger = new ClickHouseAccessLogger(dataSource, 2000);
  *   logger.add(restLog);
  *   logger.addAccessLog(accessLog);
  *   // on application shutdown:
  *   logger.shutdown();
  * </pre>
- *
- * <p>The caller must supply:
- * <ul>
- *   <li>A configured {@link javax.sql.DataSource} pointing at ClickHouse.</li>
- *   <li>A batch size (records to accumulate before flushing to DB).</li>
- *   <li>An SLF4J binding on the classpath (logback, slf4j-simple, etc.).</li>
- * </ul>
  */
 public class ClickHouseAccessLogger {
 
@@ -34,77 +26,112 @@ public class ClickHouseAccessLogger {
 
     private final AccessLogBatchService batchService;
 
-    /**
-     * Creates a logger that automatically ensures ClickHouse tables exist for
-     * today and the next 7 days, using database {@code "logs_db"} and a
-     * 60-second flush interval.
-     *
-     * @param ds        A {@link javax.sql.DataSource} backed by the ClickHouse JDBC driver.
-     * @param batchSize Number of log entries to accumulate before a batch insert is triggered.
-     */
+    // Default values used when shorter constructors delegate.
+    private static final int    DEFAULT_BATCH_SIZE             = 2000;
+    private static final int    DEFAULT_FLUSH_INTERVAL_SECONDS = 60;
+    private static final boolean DEFAULT_CREATE_TABLES         = true;
+    private static final String DEFAULT_DATABASE               = "logs_db";
+    private static final boolean DEFAULT_MASKING_ENABLED       = false;
+    private static final long   DEFAULT_MAX_BATCH_BYTES        = 10_000_000L;
+    private static final long   DEFAULT_RETRY_BUFFER_MAX_BYTES = 50_000_000L;
+    private static final int    DEFAULT_TABLE_RETRY_SECONDS    = 300;
+
+    // ---- existing constructors — all delegate, kept for source/binary compat ----
+
     public ClickHouseAccessLogger(DataSource ds, int batchSize) {
-        this(ds, batchSize, 60, true, "logs_db");
+        this(ds, batchSize, DEFAULT_FLUSH_INTERVAL_SECONDS, DEFAULT_CREATE_TABLES, DEFAULT_DATABASE,
+                DEFAULT_MASKING_ENABLED, DEFAULT_MAX_BATCH_BYTES, DEFAULT_RETRY_BUFFER_MAX_BYTES,
+                DEFAULT_TABLE_RETRY_SECONDS);
     }
 
-    /**
-     * @param ds            A {@link javax.sql.DataSource} backed by the ClickHouse JDBC driver.
-     * @param batchSize     Number of log entries to accumulate before a batch insert is triggered.
-     * @param createTables  When {@code true}, tables are created on startup and refreshed daily.
-     *                      SQL errors during table creation are logged, never thrown.
-     * @param database      ClickHouse database name in which tables are created.
-     */
     public ClickHouseAccessLogger(DataSource ds, int batchSize, boolean createTables, String database) {
-        this(ds, batchSize, 60, createTables, database);
+        this(ds, batchSize, DEFAULT_FLUSH_INTERVAL_SECONDS, createTables, database,
+                DEFAULT_MASKING_ENABLED, DEFAULT_MAX_BATCH_BYTES, DEFAULT_RETRY_BUFFER_MAX_BYTES,
+                DEFAULT_TABLE_RETRY_SECONDS);
     }
 
-    /**
-     * @param ds                   A {@link javax.sql.DataSource} backed by the ClickHouse JDBC driver.
-     * @param batchSize            Number of log entries to accumulate before a batch insert is triggered.
-     * @param flushIntervalSeconds Seconds between scheduled flush attempts; values below 1 are clamped to 60.
-     * @param createTables         When {@code true}, tables are created on startup and refreshed daily.
-     *                             SQL errors during table creation are logged, never thrown.
-     * @param database             ClickHouse database name in which tables are created.
-     */
     public ClickHouseAccessLogger(DataSource ds, int batchSize, int flushIntervalSeconds,
             boolean createTables, String database) {
-        int interval = flushIntervalSeconds;
-        if (interval < 1) {
+        this(ds, batchSize, flushIntervalSeconds, createTables, database,
+                DEFAULT_MASKING_ENABLED, DEFAULT_MAX_BATCH_BYTES, DEFAULT_RETRY_BUFFER_MAX_BYTES,
+                DEFAULT_TABLE_RETRY_SECONDS);
+    }
+
+    public ClickHouseAccessLogger(DataSource ds, int batchSize, int flushIntervalSeconds,
+            boolean createTables, String database, boolean maskingEnabled) {
+        this(ds, batchSize, flushIntervalSeconds, createTables, database, maskingEnabled,
+                DEFAULT_MAX_BATCH_BYTES, DEFAULT_RETRY_BUFFER_MAX_BYTES, DEFAULT_TABLE_RETRY_SECONDS);
+    }
+
+    // ---- 2.0.0 full constructor ----
+
+    /**
+     * @param ds                    DataSource pointing at ClickHouse.
+     * @param batchSize             Entries to accumulate before a count-based flush.
+     * @param flushIntervalSeconds  Periodic flush interval; values below 1 default to 60.
+     * @param createTables          When true, creates/verifies the two fixed tables on startup.
+     * @param database              ClickHouse database name (e.g. "logs_db").
+     * @param maskingEnabled        When true, req/res bodies are masked before insert.
+     * @param maxBatchBytes         Byte threshold that triggers an immediate flush (default 10 MB).
+     * @param retryBufferMaxBytes   Max bytes kept in the in-memory retry buffer (default 50 MB).
+     *                              Oldest batches are evicted when the cap is exceeded.
+     * @param tableRetrySeconds     Seconds between table-creation retries if ClickHouse is down (default 300).
+     */
+    public ClickHouseAccessLogger(DataSource ds, int batchSize, int flushIntervalSeconds,
+            boolean createTables, String database, boolean maskingEnabled,
+            long maxBatchBytes, long retryBufferMaxBytes, int tableRetrySeconds) {
+
+        int interval = flushIntervalSeconds < 1 ? 60 : flushIntervalSeconds;
+        if (interval != flushIntervalSeconds) {
             log.warn("flushIntervalSeconds ({}) is invalid; defaulting to 60", flushIntervalSeconds);
-            interval = 60;
         }
 
-        CommonUtils        commonUtils  = new CommonUtils();
-        AccessLogWriter    writer       = new AccessLogWriter(ds, commonUtils);
-        AccessLogCache     cache        = new AccessLogCache();
-        this.batchService              = new AccessLogBatchService(cache, writer, batchSize, interval);
+        AccessLogWriter writer = new AccessLogWriter(ds, maskingEnabled);
+        AccessLogCache  cache  = new AccessLogCache();
+        this.batchService      = new AccessLogBatchService(cache, writer, batchSize, interval,
+                database, maxBatchBytes, retryBufferMaxBytes);
 
         if (createTables) {
             AccessLogTableManager tableManager = new AccessLogTableManager(ds, database);
-            tableManager.ensureTables();
-            batchService.scheduleDaily(tableManager::ensureTables);
+            Thread initThread = new Thread(() -> {
+                while (true) {
+                    try {
+                        if (tableManager.ensureTables()) {
+                            batchService.scheduleDaily(() -> tableManager.ensureTables());
+                            log.info("ClickHouse tables ready in database '{}'", database);
+                            return;
+                        }
+                    } catch (Exception e) {
+                        log.error("ensureTables() threw unexpectedly: {}", e.getMessage(), e);
+                    }
+                    log.warn("Tables not ready; retrying in {} s", tableRetrySeconds);
+                    try {
+                        Thread.sleep(tableRetrySeconds * 1000L);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                }
+            });
+            initThread.setDaemon(true);
+            initThread.setName("ch-table-init");
+            initThread.start();
         }
     }
 
-    /**
-     * Enqueues a REST API access log entry.
-     * The table name (date-based) is assigned automatically.
-     */
+    // ---- public API ----
+
+    /** Enqueues a REST API access log entry. */
     public void add(RestAccessLogModel model) {
         batchService.add(model);
     }
 
-    /**
-     * Enqueues a general access log entry.
-     * The table name (date+hour-based) is assigned automatically.
-     */
+    /** Enqueues a general access log entry. */
     public void addAccessLog(AccessLogModel model) {
         batchService.addAccessLog(model);
     }
 
-    /**
-     * Flushes any remaining buffered entries and shuts down internal thread pools.
-     * Call once on application shutdown.
-     */
+    /** Flushes remaining entries and shuts down thread pools. Call once on shutdown. */
     public void shutdown() {
         batchService.shutdown();
     }

@@ -11,18 +11,11 @@ public class AccessLogCache {
     private final List<RestAccessLogModel> batchList          = new ArrayList<>();
     private final List<AccessLogModel>     accessLogBatchList = new ArrayList<>();
 
-    private long lastFlushTime;
+    long restQueueBytes   = 0L;
+    long accessQueueBytes = 0L;
 
     public List<RestAccessLogModel> getBatchList() {
         return batchList;
-    }
-
-    public long getLastFlushTime() {
-        return lastFlushTime;
-    }
-
-    public void setLastFlushTime(long lastFlushTime) {
-        this.lastFlushTime = lastFlushTime;
     }
 
     public List<AccessLogModel> getAccessLogBatchList() {

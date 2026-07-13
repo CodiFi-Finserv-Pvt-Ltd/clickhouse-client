@@ -1,17 +1,15 @@
 package in.codifi.clickhouse.logs;
 
-import java.sql.Date;
 import java.sql.Timestamp;
-import java.text.SimpleDateFormat;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
-import java.util.Map;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -25,13 +23,24 @@ public class AccessLogBatchService {
 
     private final AccessLogCache  cache;
     private final AccessLogWriter manager;
-    private final int                batchSize;
+    private final int             batchSize;
+    private final long            maxBatchBytes;
+    private final long            retryBufferMaxBytes;
+    private final String          database;
 
     private static final ExecutorService      pool      = Executors.newFixedThreadPool(5);
     private final        ScheduledExecutorService scheduler;
 
-    private final AtomicBoolean flushing           = new AtomicBoolean(false);
-    private final AtomicBoolean flushingAccessLog   = new AtomicBoolean(false);
+    private final AtomicBoolean flushing         = new AtomicBoolean(false);
+    private final AtomicBoolean flushingAccessLog = new AtomicBoolean(false);
+
+    // Retry buffers (guarded by their own monitor)
+    private final Deque<FailedBatch<RestAccessLogModel>> restRetry   = new ArrayDeque<>();
+    private final Deque<FailedBatch<AccessLogModel>>     accessRetry = new ArrayDeque<>();
+    private long restRetryBytes   = 0L;
+    private long accessRetryBytes = 0L;
+
+    // ---- constructors ----
 
     public AccessLogBatchService(AccessLogCache cache, AccessLogWriter manager, int batchSize) {
         this(cache, manager, batchSize, 60);
@@ -39,11 +48,18 @@ public class AccessLogBatchService {
 
     public AccessLogBatchService(AccessLogCache cache, AccessLogWriter manager, int batchSize,
             int flushIntervalSeconds) {
-        this.cache     = cache;
-        this.manager   = manager;
-        this.batchSize = batchSize;
+        this(cache, manager, batchSize, flushIntervalSeconds, "logs_db", 10_000_000L, 50_000_000L);
+    }
 
-        // Daemon scheduler so the JVM can exit without an explicit shutdown() call
+    public AccessLogBatchService(AccessLogCache cache, AccessLogWriter manager, int batchSize,
+            int flushIntervalSeconds, String database, long maxBatchBytes, long retryBufferMaxBytes) {
+        this.cache               = cache;
+        this.manager             = manager;
+        this.batchSize           = batchSize;
+        this.maxBatchBytes       = maxBatchBytes;
+        this.retryBufferMaxBytes = retryBufferMaxBytes;
+        this.database            = database;
+
         this.scheduler = Executors.newScheduledThreadPool(1, r -> {
             Thread t = new Thread(r, "clickhouse-flush-scheduler");
             t.setDaemon(true);
@@ -56,185 +72,198 @@ public class AccessLogBatchService {
                 flushIntervalSeconds, flushIntervalSeconds, TimeUnit.SECONDS);
     }
 
-    /**
-     * Adds a REST access log entry to the batch.
-     * Triggers a flush immediately if the batch size threshold is reached.
-     */
+    // ---- public add ----
+
     public void add(RestAccessLogModel model) {
+        if (model.getInTime() == null) model.setInTime(new Timestamp(System.currentTimeMillis()));
 
-        model.setTableName(generateTable(model.getInTime()));
-
-        boolean shouldFlush = false;
-
+        long entryBytes = estimateBytes(model.getReqBody(), model.getResBody());
+        boolean shouldFlush;
         synchronized (cache) {
             cache.getBatchList().add(model);
-            if (cache.getBatchList().size() >= batchSize) {
-                shouldFlush = true;
-            }
+            cache.restQueueBytes += entryBytes;
+            shouldFlush = cache.getBatchList().size() >= batchSize
+                    || cache.restQueueBytes >= maxBatchBytes;
         }
-
-        if (shouldFlush) {
-            flush();
-        }
+        if (shouldFlush) flush();
     }
 
-    /**
-     * Flushes the batched REST access logs in a thread-safe manner.
-     * Prevents concurrent flush execution; processes logs asynchronously.
-     */
-    public void flush() {
+    public void addAccessLog(AccessLogModel model) {
+        if (model.getInTime() == null) model.setInTime(new Timestamp(System.currentTimeMillis()));
 
-        if (!flushing.compareAndSet(false, true)) {
-            return;
+        long entryBytes = estimateBytes(model.getReqBody(), model.getResBody());
+        boolean shouldFlush;
+        synchronized (cache) {
+            cache.getAccessLogBatchList().add(model);
+            cache.accessQueueBytes += entryBytes;
+            shouldFlush = cache.getAccessLogBatchList().size() >= batchSize
+                    || cache.accessQueueBytes >= maxBatchBytes;
         }
+        if (shouldFlush) flushAccessLog();
+    }
+
+    // ---- flush: REST access log ----
+
+    public void flush() {
+        if (!flushing.compareAndSet(false, true)) return;
 
         List<RestAccessLogModel> copy;
-
-        try {
-            synchronized (cache) {
-                List<RestAccessLogModel> list = cache.getBatchList();
-                if (list.isEmpty()) {
-                    return;
-                }
-                copy = new ArrayList<>(list);
-                list.clear();
+        long copyBytes;
+        synchronized (cache) {
+            List<RestAccessLogModel> list = cache.getBatchList();
+            if (list.isEmpty()) {
+                flushing.set(false);
+                return;
             }
-        } finally {
-            // Flag released only after async work completes (see pool.execute below)
+            copy = new ArrayList<>(list);
+            copyBytes = cache.restQueueBytes;
+            list.clear();
+            cache.restQueueBytes = 0L;
         }
 
         pool.execute(() -> {
             try {
-                Map<String, List<RestAccessLogModel>> grouped = copy.stream()
-                        .collect(Collectors.groupingBy(RestAccessLogModel::getTableName));
-
-                for (Map.Entry<String, List<RestAccessLogModel>> entry : grouped.entrySet()) {
-                    manager.insertRestAccessLogBatch(entry.getKey(), entry.getValue());
-                }
+                drainRestRetry();
+                manager.insertRestAccessLogBatch(restTable(), copy);
             } catch (Exception e) {
-                log.error("flush() - async insert failed", e);
+                log.error("flush() failed — buffering {} REST entries ({} bytes)", copy.size(), copyBytes, e);
+                addToRestRetry(copy, copyBytes);
             } finally {
                 flushing.set(false);
             }
         });
     }
 
-    /**
-     * Adds a general access log entry to the batch.
-     * Triggers a flush immediately if the batch size threshold is reached.
-     */
-    public void addAccessLog(AccessLogModel model) {
-        if (model.getInTime() == null) {
-            model.setInTime(new Timestamp(System.currentTimeMillis()));
-        }
-        model.setTableName(generateAccessTable(model.getInTime()));
+    // ---- flush: access log ----
 
-        boolean shouldAccesslogFlush = false;
-
-        synchronized (cache) {
-            cache.getAccessLogBatchList().add(model);
-            if (cache.getAccessLogBatchList().size() >= batchSize) {
-                shouldAccesslogFlush = true;
-            }
-        }
-
-        if (shouldAccesslogFlush) {
-            flushAccessLog();
-        }
-    }
-
-    /**
-     * Flushes the batched general access logs in a thread-safe manner.
-     */
     public void flushAccessLog() {
+        if (!flushingAccessLog.compareAndSet(false, true)) return;
 
-        if (!flushingAccessLog.compareAndSet(false, true)) {
-            return;
-        }
-
-        List<AccessLogModel> copyAccessLog;
-
-        try {
-            synchronized (cache) {
-                List<AccessLogModel> list = cache.getAccessLogBatchList();
-                if (list.isEmpty()) {
-                    return;
-                }
-                copyAccessLog = new ArrayList<>(list);
-                list.clear();
+        List<AccessLogModel> copy;
+        long copyBytes;
+        synchronized (cache) {
+            List<AccessLogModel> list = cache.getAccessLogBatchList();
+            if (list.isEmpty()) {
+                flushingAccessLog.set(false);
+                return;
             }
-        } finally {
-            // Flag released only after async work completes
+            copy = new ArrayList<>(list);
+            copyBytes = cache.accessQueueBytes;
+            list.clear();
+            cache.accessQueueBytes = 0L;
         }
 
         pool.execute(() -> {
             try {
-                Map<String, List<AccessLogModel>> grouped = copyAccessLog.stream()
-                        .collect(Collectors.groupingBy(AccessLogModel::getTableName));
-
-                for (Map.Entry<String, List<AccessLogModel>> entry : grouped.entrySet()) {
-                    manager.insertAccessLogBatch(entry.getKey(), entry.getValue());
-                }
+                drainAccessRetry();
+                manager.insertAccessLogBatch(accessTable(), copy);
             } catch (Exception e) {
-                log.error("flushAccessLog() - async insert failed", e);
+                log.error("flushAccessLog() failed — buffering {} access entries ({} bytes)", copy.size(), copyBytes, e);
+                addToAccessRetry(copy, copyBytes);
             } finally {
                 flushingAccessLog.set(false);
             }
         });
     }
 
-    // -------------------------------------------------------------------------
-    // Scheduled flush callbacks (replaces @Scheduled cron methods)
-    // -------------------------------------------------------------------------
+    // ---- scheduled callbacks ----
 
     private void scheduledFlush() {
-        boolean hasData;
         synchronized (cache) {
-            hasData = !cache.getBatchList().isEmpty();
+            if (cache.getBatchList().isEmpty()) return;
         }
-        if (hasData) {
-            log.info("Scheduler flushing REST access logs...");
-            flush();
-        }
+        log.info("Scheduler flushing REST access logs...");
+        flush();
     }
 
     private void scheduledFlushAccessLog() {
         synchronized (cache) {
-            if (!cache.getAccessLogBatchList().isEmpty()) {
-                flushAccessLog();
+            if (cache.getAccessLogBatchList().isEmpty()) return;
+        }
+        flushAccessLog();
+    }
+
+    // ---- retry buffer helpers ----
+
+    private void drainRestRetry() {
+        List<FailedBatch<RestAccessLogModel>> pending;
+        synchronized (restRetry) {
+            if (restRetry.isEmpty()) return;
+            pending = new ArrayList<>(restRetry);
+            restRetry.clear();
+            restRetryBytes = 0L;
+        }
+        for (FailedBatch<RestAccessLogModel> batch : pending) {
+            try {
+                manager.insertRestAccessLogBatch(restTable(), batch.entries);
+            } catch (Exception e) {
+                log.error("Retry flush failed for {} REST entries ({} bytes)", batch.entries.size(), batch.bytes, e);
+                addToRestRetry(batch.entries, batch.bytes);
             }
         }
     }
 
-    // -------------------------------------------------------------------------
-    // Table-name generation — identical format to the original
-    // -------------------------------------------------------------------------
-
-    private String generateTable(Timestamp time) {
-        Date d    = new Date(time.getTime());
-        String date = new SimpleDateFormat("ddMMyyyy").format(d);
-        return "tbl_" + date + "_rest_access_log";
+    private void drainAccessRetry() {
+        List<FailedBatch<AccessLogModel>> pending;
+        synchronized (accessRetry) {
+            if (accessRetry.isEmpty()) return;
+            pending = new ArrayList<>(accessRetry);
+            accessRetry.clear();
+            accessRetryBytes = 0L;
+        }
+        for (FailedBatch<AccessLogModel> batch : pending) {
+            try {
+                manager.insertAccessLogBatch(accessTable(), batch.entries);
+            } catch (Exception e) {
+                log.error("Retry flush failed for {} access entries ({} bytes)", batch.entries.size(), batch.bytes, e);
+                addToAccessRetry(batch.entries, batch.bytes);
+            }
+        }
     }
 
-    private String generateAccessTable(Timestamp time) {
-        Date d    = new Date(time.getTime());
-        String date = new SimpleDateFormat("ddMMyyyy").format(d);
-        String hour = new SimpleDateFormat("HH").format(d);
-        return "tbl_" + date + "_access_log_" + hour;
+    private void addToRestRetry(List<RestAccessLogModel> entries, long bytes) {
+        synchronized (restRetry) {
+            restRetry.addLast(new FailedBatch<>(entries, bytes));
+            restRetryBytes += bytes;
+            while (restRetryBytes > retryBufferMaxBytes && !restRetry.isEmpty()) {
+                FailedBatch<RestAccessLogModel> oldest = restRetry.pollFirst();
+                restRetryBytes -= oldest.bytes;
+                log.warn("REST retry buffer over cap ({} bytes) — dropped {} entries ({} bytes)",
+                        retryBufferMaxBytes, oldest.entries.size(), oldest.bytes);
+            }
+        }
     }
 
-    // -------------------------------------------------------------------------
-    // Lifecycle
-    // -------------------------------------------------------------------------
+    private void addToAccessRetry(List<AccessLogModel> entries, long bytes) {
+        synchronized (accessRetry) {
+            accessRetry.addLast(new FailedBatch<>(entries, bytes));
+            accessRetryBytes += bytes;
+            while (accessRetryBytes > retryBufferMaxBytes && !accessRetry.isEmpty()) {
+                FailedBatch<AccessLogModel> oldest = accessRetry.pollFirst();
+                accessRetryBytes -= oldest.bytes;
+                log.warn("Access retry buffer over cap ({} bytes) — dropped {} entries ({} bytes)",
+                        retryBufferMaxBytes, oldest.entries.size(), oldest.bytes);
+            }
+        }
+    }
+
+    // ---- table names ----
+
+    private String restTable()   { return database + ".tbl_rest_access_log"; }
+    private String accessTable() { return database + ".tbl_access_log"; }
+
+    // ---- byte estimation ----
+
+    private static long estimateBytes(String req, String res) {
+        return (req != null ? req.length() : 0L) + (res != null ? res.length() : 0L);
+    }
+
+    // ---- lifecycle ----
 
     void scheduleDaily(Runnable task) {
         scheduler.scheduleAtFixedRate(task, 24, 24, TimeUnit.HOURS);
     }
 
-    /**
-     * Stops the scheduler, submits a final flush of both queues,
-     * then waits up to 30 s for in-flight inserts to complete.
-     */
     public void shutdown() {
         scheduler.shutdown();
         flush();
@@ -249,6 +278,18 @@ public class AccessLogBatchService {
             Thread.currentThread().interrupt();
             pool.shutdownNow();
             log.error("Shutdown interrupted", e);
+        }
+    }
+
+    // ---- inner type ----
+
+    private static class FailedBatch<T> {
+        final List<T> entries;
+        final long    bytes;
+
+        FailedBatch(List<T> entries, long bytes) {
+            this.entries = entries;
+            this.bytes   = bytes;
         }
     }
 }

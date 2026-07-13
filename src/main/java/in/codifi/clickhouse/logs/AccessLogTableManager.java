@@ -2,8 +2,6 @@ package in.codifi.clickhouse.logs;
 
 import java.sql.Connection;
 import java.sql.Statement;
-import java.time.LocalDate;
-import java.time.format.DateTimeFormatter;
 
 import javax.sql.DataSource;
 
@@ -14,8 +12,6 @@ public class AccessLogTableManager {
 
     private static final Logger log = LoggerFactory.getLogger(AccessLogTableManager.class);
 
-    private static final DateTimeFormatter DATE_FMT = DateTimeFormatter.ofPattern("ddMMyyyy");
-
     private final DataSource ds;
     private final String     database;
 
@@ -24,76 +20,82 @@ public class AccessLogTableManager {
         this.database = database;
     }
 
-    public void ensureTables() {
-        LocalDate today = LocalDate.now();
-        for (int d = 0; d <= 7; d++) {
-            LocalDate day      = today.plusDays(d);
-            String    datePart = day.format(DATE_FMT);
-
-            for (int h = 0; h < 24; h++) {
-                String hour      = String.format("%02d", h);
-                String tableName = "tbl_" + datePart + "_access_log_" + hour;
-                execute(buildAccessLogDdl(tableName), tableName);
-            }
-
-            String restTable = "tbl_" + datePart + "_rest_access_log";
-            execute(buildRestAccessLogDdl(restTable), restTable);
-        }
+    /**
+     * Creates (or confirms) both fixed partitioned tables.
+     * Returns true if both succeeded, false if either failed.
+     */
+    public boolean ensureTables() {
+        boolean ok = true;
+        ok &= execute(buildAccessLogDdl(), database + ".tbl_access_log");
+        ok &= execute(buildRestAccessLogDdl(), database + ".tbl_rest_access_log");
+        return ok;
     }
 
-    private String buildAccessLogDdl(String tableName) {
-        return "CREATE TABLE IF NOT EXISTS " + database + "." + tableName + " ("
-                + "id UUID DEFAULT generateUUIDv4(), "
-                + "user_id Nullable(String), "
+    private String buildAccessLogDdl() {
+        return "CREATE TABLE IF NOT EXISTS " + database + ".tbl_access_log ("
+                + "user_id String, "
                 + "ucc Nullable(String), "
-                + "uri Nullable(String), "
-                + "module Nullable(String), "
-                + "method Nullable(String), "
-                + "source Nullable(String), "
-                + "req_body Nullable(String), "
-                + "res_body Nullable(String), "
+                + "uri String, "
+                + "module LowCardinality(Nullable(String)), "
+                + "method LowCardinality(Nullable(String)), "
+                + "status_code Nullable(Int32), "
+                + "source LowCardinality(Nullable(String)), "
+                + "req_body String CODEC(ZSTD(3)), "
+                + "res_body String CODEC(ZSTD(3)), "
                 + "device_ip Nullable(String), "
                 + "device_id Nullable(String), "
                 + "req_id Nullable(String), "
                 + "user_agent Nullable(String), "
                 + "domain Nullable(String), "
-                + "content_type Nullable(String), "
+                + "content_type LowCardinality(Nullable(String)), "
                 + "session Nullable(String), "
-                + "in_time Nullable(String), "
-                + "out_time Nullable(String), "
-                + "lag_time Nullable(Int64), "
-                + "elapsed_time Nullable(String), "
-                + "vendor Nullable(String), "
-                + "created_on Nullable(String)"
-                + ") ENGINE = MergeTree ORDER BY (user_id, created_on) "
-                + "SETTINGS index_granularity = 8192, allow_nullable_key = 1";
+                + "in_time DateTime64(3), "
+                + "out_time DateTime64(3), "
+                + "latency_ms Int64 MATERIALIZED dateDiff('millisecond', in_time, out_time), "
+                + "vendor LowCardinality(Nullable(String)), "
+                + "filler1 Nullable(String), "
+                + "filler2 Nullable(String), "
+                + "pod_id Nullable(String)"
+                + ") ENGINE = MergeTree"
+                + " PARTITION BY toYYYYMMDD(in_time)"
+                + " ORDER BY (user_id, in_time, module, uri)"
+                + " SETTINGS index_granularity = 8192, allow_nullable_key = 1";
     }
 
-    private String buildRestAccessLogDdl(String tableName) {
-        return "CREATE TABLE IF NOT EXISTS " + database + "." + tableName + " ("
-                + "id UUID DEFAULT generateUUIDv4(), "
-                + "user_id Nullable(String), "
-                + "module Nullable(String), "
+    private String buildRestAccessLogDdl() {
+        return "CREATE TABLE IF NOT EXISTS " + database + ".tbl_rest_access_log ("
+                + "user_id String, "
+                + "ucc Nullable(String), "
+                + "module LowCardinality(Nullable(String)), "
                 + "device_id Nullable(String), "
-                + "method Nullable(String), "
-                + "url Nullable(String), "
-                + "req_body Nullable(String), "
-                + "res_body Nullable(String), "
-                + "in_time Nullable(String), "
-                + "out_time Nullable(String), "
+                + "method LowCardinality(Nullable(String)), "
+                + "status_code Nullable(Int32), "
+                + "url String, "
+                + "req_id Nullable(String), "
+                + "req_body String CODEC(ZSTD(3)), "
+                + "res_body String CODEC(ZSTD(3)), "
+                + "in_time DateTime64(3), "
+                + "out_time DateTime64(3), "
+                + "latency_ms Int64 MATERIALIZED dateDiff('millisecond', in_time, out_time), "
                 + "total_time Nullable(UInt64), "
-                + "created_on Nullable(String), "
-                + "vendor Nullable(String), "
-                + "source Nullable(String)"
-                + ") ENGINE = MergeTree ORDER BY (user_id, created_on) "
-                + "SETTINGS index_granularity = 8192, allow_nullable_key = 1";
+                + "vendor LowCardinality(Nullable(String)), "
+                + "source LowCardinality(Nullable(String)), "
+                + "filler1 Nullable(String), "
+                + "filler2 Nullable(String), "
+                + "pod_id Nullable(String)"
+                + ") ENGINE = MergeTree"
+                + " PARTITION BY toYYYYMMDD(in_time)"
+                + " ORDER BY (user_id, in_time, module)"
+                + " SETTINGS index_granularity = 8192, allow_nullable_key = 1";
     }
 
-    private void execute(String sql, String tableName) {
+    private boolean execute(String sql, String label) {
         try (Connection conn = ds.getConnection(); Statement stmt = conn.createStatement()) {
             stmt.execute(sql);
+            return true;
         } catch (Exception e) {
-            log.error("Failed to create table {}: {}", tableName, e.getMessage());
+            log.error("Failed to create table {}: {}", label, e.getMessage());
+            return false;
         }
     }
 }

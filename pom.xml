@@ -6,13 +6,13 @@
 
     <modelVersion>4.0.0</modelVersion>
 
-    <groupId>in.codifi</groupId>
+    <groupId>io.github.codifi-repositories</groupId>
     <artifactId>codifi-clickhouse-logs-core</artifactId>
-    <version>1.0.0</version>
+    <version>2.0.0</version>
     <packaging>jar</packaging>
 
     <name>Codifi ClickHouse Logs Core</name>
-    <description>Java ClickHouse access/REST logging library</description>
+    <description>Java ClickHouse access/REST logging library with batching, partitioned tables, masking, byte-based flush triggers, and resilient retry buffering.</description>
     <url>https://github.com/CodiFi-Finserv-Pvt-Ltd/clickhouse-client</url>
 
     <licenses>
@@ -32,15 +32,9 @@
     </developers>
 
     <scm>
-        <connection>
-            scm:git:https://github.com/CodiFi-Finserv-Pvt-Ltd/clickhouse-client.git
-        </connection>
-        <developerConnection>
-            scm:git:ssh://git@github.com/CodiFi-Finserv-Pvt-Ltd/clickhouse-client.git
-        </developerConnection>
-        <url>
-            https://github.com/CodiFi-Finserv-Pvt-Ltd/clickhouse-client
-        </url>
+        <connection>scm:git:git://github.com/CodiFi-Finserv-Pvt-Ltd/clickhouse-client.git</connection>
+        <developerConnection>scm:git:ssh://github.com/CodiFi-Finserv-Pvt-Ltd/clickhouse-client.git</developerConnection>
+        <url>https://github.com/CodiFi-Finserv-Pvt-Ltd/clickhouse-client</url>
         <tag>HEAD</tag>
     </scm>
 
@@ -48,13 +42,6 @@
         <maven.compiler.release>11</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     </properties>
-
-    <distributionManagement>
-        <repository>
-            <id>github</id>
-            <url>https://maven.pkg.github.com/CodiFi-Finserv-Pvt-Ltd/clickhouse-client</url>
-        </repository>
-    </distributionManagement>
 
     <dependencies>
 
@@ -84,6 +71,12 @@
         </dependency>
 
         <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-annotations</artifactId>
+            <version>2.15.2</version>
+        </dependency>
+
+        <dependency>
             <groupId>org.bouncycastle</groupId>
             <artifactId>bcprov-jdk15on</artifactId>
             <version>1.70</version>
@@ -94,7 +87,6 @@
     <build>
         <plugins>
 
-            <!-- Compile -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
@@ -104,7 +96,6 @@
                 </configuration>
             </plugin>
 
-            <!-- Source Jar -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-source-plugin</artifactId>
@@ -119,7 +110,6 @@
                 </executions>
             </plugin>
 
-            <!-- Javadoc Jar -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-javadoc-plugin</artifactId>
@@ -135,6 +125,32 @@
                         </goals>
                     </execution>
                 </executions>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-gpg-plugin</artifactId>
+                <version>3.2.4</version>
+                <executions>
+                    <execution>
+                        <id>sign-artifacts</id>
+                        <phase>verify</phase>
+                        <goals>
+                            <goal>sign</goal>
+                        </goals>
+                    </execution>
+                </executions>
+            </plugin>
+
+            <plugin>
+                <groupId>org.sonatype.central</groupId>
+                <artifactId>central-publishing-maven-plugin</artifactId>
+                <version>0.8.0</version>
+                <extensions>true</extensions>
+                <configuration>
+                    <publishingServerId>central</publishingServerId>
+                    <autoPublish>true</autoPublish>
+                </configuration>
             </plugin>
 
         </plugins>
