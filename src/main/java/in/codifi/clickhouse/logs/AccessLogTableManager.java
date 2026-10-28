@@ -28,6 +28,7 @@ public class AccessLogTableManager {
         boolean ok = true;
         ok &= execute(buildAccessLogDdl(), database + ".tbl_access_log");
         ok &= execute(buildRestAccessLogDdl(), database + ".tbl_rest_access_log");
+        ok &= execute(buildUserLoginReportDdl(), database + ".tbl_user_loggedin_report");
         return ok;
     }
 
@@ -87,6 +88,20 @@ public class AccessLogTableManager {
                 + " PARTITION BY toYYYYMMDD(in_time)"
                 + " ORDER BY (user_id, in_time, module)"
                 + " SETTINGS index_granularity = 8192, allow_nullable_key = 1";
+    }
+
+    private String buildUserLoginReportDdl() {
+        return "CREATE TABLE IF NOT EXISTS " + database + ".tbl_user_loggedin_report ("
+                + "`user_id` String, "
+                + "`source` LowCardinality(String), "
+                + "`vendor` LowCardinality(Nullable(String)), "
+                + "`visitors` Int32, "
+                + "`report_date` Date DEFAULT toDate(`created_on`), "
+                + "`created_on` DateTime DEFAULT now()"
+                + ") ENGINE = SummingMergeTree(`visitors`)"
+                + " PARTITION BY toYYYYMM(`report_date`)"
+                + " ORDER BY (`report_date`, `user_id`, `source`)"
+                + " SETTINGS index_granularity = 8192";
     }
 
     private boolean execute(String sql, String label) {

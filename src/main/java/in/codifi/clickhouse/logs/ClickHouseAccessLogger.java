@@ -7,6 +7,7 @@ import org.slf4j.LoggerFactory;
 
 import in.codifi.clickhouse.logs.model.AccessLogModel;
 import in.codifi.clickhouse.logs.model.RestAccessLogModel;
+import in.codifi.clickhouse.logs.model.UserLoginReportModel;
 
 /**
  * Public entry point for the codifi-clickhouse-logs-core library.
@@ -129,6 +130,11 @@ public class ClickHouseAccessLogger {
     /** Enqueues a general access log entry. */
     public void addAccessLog(AccessLogModel model) {
         batchService.addAccessLog(model);
+    }
+
+    /** Enqueues a user login-report entry. */
+    public void addLoginReport(UserLoginReportModel model) {
+        batchService.addLoginReport(model);
     }
 
     /** Flushes remaining entries and shuts down thread pools. Call once on shutdown. */

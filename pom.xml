@@ -8,7 +8,7 @@
 
     <groupId>io.github.codifi-repositories</groupId>
     <artifactId>codifi-clickhouse-logs-core</artifactId>
-    <version>2.0.0</version>
+    <version>2.1.0</version>
     <packaging>jar</packaging>
 
     <name>Codifi ClickHouse Logs Core</name>

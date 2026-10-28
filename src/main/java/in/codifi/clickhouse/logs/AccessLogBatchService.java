@@ -16,6 +16,7 @@ import org.slf4j.LoggerFactory;
 
 import in.codifi.clickhouse.logs.model.AccessLogModel;
 import in.codifi.clickhouse.logs.model.RestAccessLogModel;
+import in.codifi.clickhouse.logs.model.UserLoginReportModel;
 
 public class AccessLogBatchService {
 
@@ -31,14 +32,17 @@ public class AccessLogBatchService {
     private static final ExecutorService      pool      = Executors.newFixedThreadPool(5);
     private final        ScheduledExecutorService scheduler;
 
-    private final AtomicBoolean flushing         = new AtomicBoolean(false);
-    private final AtomicBoolean flushingAccessLog = new AtomicBoolean(false);
+    private final AtomicBoolean flushing            = new AtomicBoolean(false);
+    private final AtomicBoolean flushingAccessLog    = new AtomicBoolean(false);
+    private final AtomicBoolean flushingLoginReport  = new AtomicBoolean(false);
 
     // Retry buffers (guarded by their own monitor)
-    private final Deque<FailedBatch<RestAccessLogModel>> restRetry   = new ArrayDeque<>();
-    private final Deque<FailedBatch<AccessLogModel>>     accessRetry = new ArrayDeque<>();
-    private long restRetryBytes   = 0L;
-    private long accessRetryBytes = 0L;
+    private final Deque<FailedBatch<RestAccessLogModel>>   restRetry        = new ArrayDeque<>();
+    private final Deque<FailedBatch<AccessLogModel>>       accessRetry      = new ArrayDeque<>();
+    private final Deque<FailedBatch<UserLoginReportModel>> loginReportRetry = new ArrayDeque<>();
+    private long restRetryBytes        = 0L;
+    private long accessRetryBytes      = 0L;
+    private long loginReportRetryBytes = 0L;
 
     // ---- constructors ----
 
@@ -70,6 +74,8 @@ public class AccessLogBatchService {
                 flushIntervalSeconds, flushIntervalSeconds, TimeUnit.SECONDS);
         scheduler.scheduleAtFixedRate(this::scheduledFlushAccessLog,
                 flushIntervalSeconds, flushIntervalSeconds, TimeUnit.SECONDS);
+        scheduler.scheduleAtFixedRate(this::scheduledFlushLoginReport,
+                flushIntervalSeconds, flushIntervalSeconds, TimeUnit.SECONDS);
     }
 
     // ---- public add ----
@@ -100,6 +106,18 @@ public class AccessLogBatchService {
                     || cache.accessQueueBytes >= maxBatchBytes;
         }
         if (shouldFlush) flushAccessLog();
+    }
+
+    public void addLoginReport(UserLoginReportModel model) {
+        long entryBytes = estimateLoginReportBytes(model);
+        boolean shouldFlush;
+        synchronized (cache) {
+            cache.getLoginReportBatchList().add(model);
+            cache.loginReportQueueBytes += entryBytes;
+            shouldFlush = cache.getLoginReportBatchList().size() >= batchSize
+                    || cache.loginReportQueueBytes >= maxBatchBytes;
+        }
+        if (shouldFlush) flushLoginReport();
     }
 
     // ---- flush: REST access log ----
@@ -166,6 +184,38 @@ public class AccessLogBatchService {
         });
     }
 
+    // ---- flush: login report ----
+
+    public void flushLoginReport() {
+        if (!flushingLoginReport.compareAndSet(false, true)) return;
+
+        List<UserLoginReportModel> copy;
+        long copyBytes;
+        synchronized (cache) {
+            List<UserLoginReportModel> list = cache.getLoginReportBatchList();
+            if (list.isEmpty()) {
+                flushingLoginReport.set(false);
+                return;
+            }
+            copy = new ArrayList<>(list);
+            copyBytes = cache.loginReportQueueBytes;
+            list.clear();
+            cache.loginReportQueueBytes = 0L;
+        }
+
+        pool.execute(() -> {
+            try {
+                drainLoginReportRetry();
+                manager.insertLoginReportBatch(loginReportTable(), copy);
+            } catch (Exception e) {
+                log.error("flushLoginReport() failed — buffering {} login-report entries ({} bytes)", copy.size(), copyBytes, e);
+                addToLoginReportRetry(copy, copyBytes);
+            } finally {
+                flushingLoginReport.set(false);
+            }
+        });
+    }
+
     // ---- scheduled callbacks ----
 
     private void scheduledFlush() {
@@ -181,6 +231,13 @@ public class AccessLogBatchService {
             if (cache.getAccessLogBatchList().isEmpty()) return;
         }
         flushAccessLog();
+    }
+
+    private void scheduledFlushLoginReport() {
+        synchronized (cache) {
+            if (cache.getLoginReportBatchList().isEmpty()) return;
+        }
+        flushLoginReport();
     }
 
     // ---- retry buffer helpers ----
@@ -221,6 +278,24 @@ public class AccessLogBatchService {
         }
     }
 
+    private void drainLoginReportRetry() {
+        List<FailedBatch<UserLoginReportModel>> pending;
+        synchronized (loginReportRetry) {
+            if (loginReportRetry.isEmpty()) return;
+            pending = new ArrayList<>(loginReportRetry);
+            loginReportRetry.clear();
+            loginReportRetryBytes = 0L;
+        }
+        for (FailedBatch<UserLoginReportModel> batch : pending) {
+            try {
+                manager.insertLoginReportBatch(loginReportTable(), batch.entries);
+            } catch (Exception e) {
+                log.error("Retry flush failed for {} login-report entries ({} bytes)", batch.entries.size(), batch.bytes, e);
+                addToLoginReportRetry(batch.entries, batch.bytes);
+            }
+        }
+    }
+
     private void addToRestRetry(List<RestAccessLogModel> entries, long bytes) {
         synchronized (restRetry) {
             restRetry.addLast(new FailedBatch<>(entries, bytes));
@@ -247,15 +322,37 @@ public class AccessLogBatchService {
         }
     }
 
+    private void addToLoginReportRetry(List<UserLoginReportModel> entries, long bytes) {
+        synchronized (loginReportRetry) {
+            loginReportRetry.addLast(new FailedBatch<>(entries, bytes));
+            loginReportRetryBytes += bytes;
+            while (loginReportRetryBytes > retryBufferMaxBytes && !loginReportRetry.isEmpty()) {
+                FailedBatch<UserLoginReportModel> oldest = loginReportRetry.pollFirst();
+                loginReportRetryBytes -= oldest.bytes;
+                log.warn("Login-report retry buffer over cap ({} bytes) — dropped {} entries ({} bytes)",
+                        retryBufferMaxBytes, oldest.entries.size(), oldest.bytes);
+            }
+        }
+    }
+
     // ---- table names ----
 
-    private String restTable()   { return database + ".tbl_rest_access_log"; }
-    private String accessTable() { return database + ".tbl_access_log"; }
+    private String restTable()        { return database + ".tbl_rest_access_log"; }
+    private String accessTable()      { return database + ".tbl_access_log"; }
+    private String loginReportTable() { return database + ".tbl_user_loggedin_report"; }
 
     // ---- byte estimation ----
 
     private static long estimateBytes(String req, String res) {
         return (req != null ? req.length() : 0L) + (res != null ? res.length() : 0L);
+    }
+
+    private static long estimateLoginReportBytes(UserLoginReportModel model) {
+        long bytes = 4L; // visitors (Int32)
+        bytes += model.getUserId() != null ? model.getUserId().length() : 0L;
+        bytes += model.getSource() != null ? model.getSource().length() : 0L;
+        bytes += model.getVendor() != null ? model.getVendor().length() : 0L;
+        return bytes;
     }
 
     // ---- lifecycle ----
@@ -268,6 +365,7 @@ public class AccessLogBatchService {
         scheduler.shutdown();
         flush();
         flushAccessLog();
+        flushLoginReport();
         pool.shutdown();
         try {
             if (!pool.awaitTermination(30, TimeUnit.SECONDS)) {
