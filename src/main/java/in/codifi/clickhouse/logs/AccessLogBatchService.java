@@ -14,6 +14,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import in.codifi.clickhouse.logs.fallback.FallbackManager;
+import in.codifi.clickhouse.logs.fallback.LogType;
 import in.codifi.clickhouse.logs.model.AccessLogModel;
 import in.codifi.clickhouse.logs.model.RestAccessLogModel;
 import in.codifi.clickhouse.logs.model.UserLoginReportModel;
@@ -28,6 +30,7 @@ public class AccessLogBatchService {
     private final long            maxBatchBytes;
     private final long            retryBufferMaxBytes;
     private final String          database;
+    private final FallbackManager fallback; // null = disabled → in-memory retry buffer only (pre-2.2 behaviour)
 
     private static final ExecutorService      pool      = Executors.newFixedThreadPool(5);
     private final        ScheduledExecutorService scheduler;
@@ -57,12 +60,23 @@ public class AccessLogBatchService {
 
     public AccessLogBatchService(AccessLogCache cache, AccessLogWriter manager, int batchSize,
             int flushIntervalSeconds, String database, long maxBatchBytes, long retryBufferMaxBytes) {
+        this(cache, manager, batchSize, flushIntervalSeconds, database, maxBatchBytes, retryBufferMaxBytes, null);
+    }
+
+    /**
+     * @param fallback disk/S3 fallback for failed batches, or {@code null} to use only the
+     *                 in-memory retry buffer. Rows the fallback cannot store still go to that buffer.
+     */
+    public AccessLogBatchService(AccessLogCache cache, AccessLogWriter manager, int batchSize,
+            int flushIntervalSeconds, String database, long maxBatchBytes, long retryBufferMaxBytes,
+            FallbackManager fallback) {
         this.cache               = cache;
         this.manager             = manager;
         this.batchSize           = batchSize;
         this.maxBatchBytes       = maxBatchBytes;
         this.retryBufferMaxBytes = retryBufferMaxBytes;
         this.database            = database;
+        this.fallback            = fallback;
 
         this.scheduler = Executors.newScheduledThreadPool(1, r -> {
             Thread t = new Thread(r, "clickhouse-flush-scheduler");
@@ -144,8 +158,14 @@ public class AccessLogBatchService {
                 drainRestRetry();
                 manager.insertRestAccessLogBatch(restTable(), copy);
             } catch (Exception e) {
-                log.error("flush() failed — buffering {} REST entries ({} bytes)", copy.size(), copyBytes, e);
-                addToRestRetry(copy, copyBytes);
+                if (fallback == null) {
+                    log.error("flush() failed — buffering {} REST entries ({} bytes)", copy.size(), copyBytes, e);
+                    addToRestRetry(copy, copyBytes);
+                } else {
+                    log.error("flush() failed — routing {} REST entries ({} bytes) to fallback", copy.size(), copyBytes, e);
+                    List<RestAccessLogModel> left = fallback.offer(LogType.REST, copy);
+                    if (!left.isEmpty()) addToRestRetry(left, left == copy ? copyBytes : restBytes(left));
+                }
             } finally {
                 flushing.set(false);
             }
@@ -176,8 +196,14 @@ public class AccessLogBatchService {
                 drainAccessRetry();
                 manager.insertAccessLogBatch(accessTable(), copy);
             } catch (Exception e) {
-                log.error("flushAccessLog() failed — buffering {} access entries ({} bytes)", copy.size(), copyBytes, e);
-                addToAccessRetry(copy, copyBytes);
+                if (fallback == null) {
+                    log.error("flushAccessLog() failed — buffering {} access entries ({} bytes)", copy.size(), copyBytes, e);
+                    addToAccessRetry(copy, copyBytes);
+                } else {
+                    log.error("flushAccessLog() failed — routing {} access entries ({} bytes) to fallback", copy.size(), copyBytes, e);
+                    List<AccessLogModel> left = fallback.offer(LogType.ACCESS, copy);
+                    if (!left.isEmpty()) addToAccessRetry(left, left == copy ? copyBytes : accessBytes(left));
+                }
             } finally {
                 flushingAccessLog.set(false);
             }
@@ -208,8 +234,14 @@ public class AccessLogBatchService {
                 drainLoginReportRetry();
                 manager.insertLoginReportBatch(loginReportTable(), copy);
             } catch (Exception e) {
-                log.error("flushLoginReport() failed — buffering {} login-report entries ({} bytes)", copy.size(), copyBytes, e);
-                addToLoginReportRetry(copy, copyBytes);
+                if (fallback == null) {
+                    log.error("flushLoginReport() failed — buffering {} login-report entries ({} bytes)", copy.size(), copyBytes, e);
+                    addToLoginReportRetry(copy, copyBytes);
+                } else {
+                    log.error("flushLoginReport() failed — routing {} login-report entries ({} bytes) to fallback", copy.size(), copyBytes, e);
+                    List<UserLoginReportModel> left = fallback.offer(LogType.LOGIN, copy);
+                    if (!left.isEmpty()) addToLoginReportRetry(left, left == copy ? copyBytes : loginReportBytes(left));
+                }
             } finally {
                 flushingLoginReport.set(false);
             }
@@ -347,6 +379,24 @@ public class AccessLogBatchService {
         return (req != null ? req.length() : 0L) + (res != null ? res.length() : 0L);
     }
 
+    private static long restBytes(List<RestAccessLogModel> list) {
+        long total = 0L;
+        for (RestAccessLogModel m : list) total += estimateBytes(m.getReqBody(), m.getResBody());
+        return total;
+    }
+
+    private static long accessBytes(List<AccessLogModel> list) {
+        long total = 0L;
+        for (AccessLogModel m : list) total += estimateBytes(m.getReqBody(), m.getResBody());
+        return total;
+    }
+
+    private static long loginReportBytes(List<UserLoginReportModel> list) {
+        long total = 0L;
+        for (UserLoginReportModel m : list) total += estimateLoginReportBytes(m);
+        return total;
+    }
+
     private static long estimateLoginReportBytes(UserLoginReportModel model) {
         long bytes = 4L; // visitors (Int32)
         bytes += model.getUserId() != null ? model.getUserId().length() : 0L;
@@ -377,6 +427,7 @@ public class AccessLogBatchService {
             pool.shutdownNow();
             log.error("Shutdown interrupted", e);
         }
+        if (fallback != null) fallback.shutdown();
     }
 
     // ---- inner type ----

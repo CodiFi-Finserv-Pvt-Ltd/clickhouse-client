@@ -5,6 +5,8 @@ import javax.sql.DataSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import in.codifi.clickhouse.logs.fallback.FallbackConfig;
+import in.codifi.clickhouse.logs.fallback.FallbackManager;
 import in.codifi.clickhouse.logs.model.AccessLogModel;
 import in.codifi.clickhouse.logs.model.RestAccessLogModel;
 import in.codifi.clickhouse.logs.model.UserLoginReportModel;
@@ -81,6 +83,23 @@ public class ClickHouseAccessLogger {
     public ClickHouseAccessLogger(DataSource ds, int batchSize, int flushIntervalSeconds,
             boolean createTables, String database, boolean maskingEnabled,
             long maxBatchBytes, long retryBufferMaxBytes, int tableRetrySeconds) {
+        this(ds, batchSize, flushIntervalSeconds, createTables, database, maskingEnabled,
+                maxBatchBytes, retryBufferMaxBytes, tableRetrySeconds, FallbackConfig.disabled());
+    }
+
+    // ---- 2.2.0 constructor with disk/S3 fallback ----
+
+    /**
+     * Same as the 2.0.0 constructor, plus a fallback store for failed batches.
+     *
+     * @param fallbackConfig  Disk/S3 fallback settings (see {@link FallbackConfig#fromProperties}).
+     *                        {@code null}, disabled, or invalid config logs a WARN where relevant and
+     *                        keeps the in-memory retry buffer — it never fails construction.
+     */
+    public ClickHouseAccessLogger(DataSource ds, int batchSize, int flushIntervalSeconds,
+            boolean createTables, String database, boolean maskingEnabled,
+            long maxBatchBytes, long retryBufferMaxBytes, int tableRetrySeconds,
+            FallbackConfig fallbackConfig) {
 
         int interval = flushIntervalSeconds < 1 ? 60 : flushIntervalSeconds;
         if (interval != flushIntervalSeconds) {
@@ -89,8 +108,9 @@ public class ClickHouseAccessLogger {
 
         AccessLogWriter writer = new AccessLogWriter(ds, maskingEnabled);
         AccessLogCache  cache  = new AccessLogCache();
+        FallbackManager fallback = FallbackManager.create(fallbackConfig, ds, database, maskingEnabled);
         this.batchService      = new AccessLogBatchService(cache, writer, batchSize, interval,
-                database, maxBatchBytes, retryBufferMaxBytes);
+                database, maxBatchBytes, retryBufferMaxBytes, fallback);
 
         if (createTables) {
             AccessLogTableManager tableManager = new AccessLogTableManager(ds, database);
