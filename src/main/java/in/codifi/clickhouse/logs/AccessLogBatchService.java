@@ -17,7 +17,9 @@ import org.slf4j.LoggerFactory;
 import in.codifi.clickhouse.logs.fallback.FallbackManager;
 import in.codifi.clickhouse.logs.fallback.LogType;
 import in.codifi.clickhouse.logs.model.AccessLogModel;
+import in.codifi.clickhouse.logs.model.EmailLogModel;
 import in.codifi.clickhouse.logs.model.RestAccessLogModel;
+import in.codifi.clickhouse.logs.model.SmsLogModel;
 import in.codifi.clickhouse.logs.model.UserLoginReportModel;
 
 public class AccessLogBatchService {
@@ -38,14 +40,20 @@ public class AccessLogBatchService {
     private final AtomicBoolean flushing            = new AtomicBoolean(false);
     private final AtomicBoolean flushingAccessLog    = new AtomicBoolean(false);
     private final AtomicBoolean flushingLoginReport  = new AtomicBoolean(false);
+    private final AtomicBoolean flushingEmailLog     = new AtomicBoolean(false);
+    private final AtomicBoolean flushingSmsLog       = new AtomicBoolean(false);
 
     // Retry buffers (guarded by their own monitor)
     private final Deque<FailedBatch<RestAccessLogModel>>   restRetry        = new ArrayDeque<>();
     private final Deque<FailedBatch<AccessLogModel>>       accessRetry      = new ArrayDeque<>();
     private final Deque<FailedBatch<UserLoginReportModel>> loginReportRetry = new ArrayDeque<>();
+    private final Deque<FailedBatch<EmailLogModel>>        emailRetry       = new ArrayDeque<>();
+    private final Deque<FailedBatch<SmsLogModel>>          smsRetry         = new ArrayDeque<>();
     private long restRetryBytes        = 0L;
     private long accessRetryBytes      = 0L;
     private long loginReportRetryBytes = 0L;
+    private long emailRetryBytes       = 0L;
+    private long smsRetryBytes         = 0L;
 
     // ---- constructors ----
 
@@ -90,6 +98,10 @@ public class AccessLogBatchService {
                 flushIntervalSeconds, flushIntervalSeconds, TimeUnit.SECONDS);
         scheduler.scheduleAtFixedRate(this::scheduledFlushLoginReport,
                 flushIntervalSeconds, flushIntervalSeconds, TimeUnit.SECONDS);
+        scheduler.scheduleAtFixedRate(this::scheduledFlushEmailLog,
+                flushIntervalSeconds, flushIntervalSeconds, TimeUnit.SECONDS);
+        scheduler.scheduleAtFixedRate(this::scheduledFlushSmsLog,
+                flushIntervalSeconds, flushIntervalSeconds, TimeUnit.SECONDS);
     }
 
     // ---- public add ----
@@ -132,6 +144,30 @@ public class AccessLogBatchService {
                     || cache.loginReportQueueBytes >= maxBatchBytes;
         }
         if (shouldFlush) flushLoginReport();
+    }
+
+    public void addEmailLog(EmailLogModel model) {
+        long entryBytes = estimateEmailLogBytes(model);
+        boolean shouldFlush;
+        synchronized (cache) {
+            cache.getEmailLogBatchList().add(model);
+            cache.emailQueueBytes += entryBytes;
+            shouldFlush = cache.getEmailLogBatchList().size() >= batchSize
+                    || cache.emailQueueBytes >= maxBatchBytes;
+        }
+        if (shouldFlush) flushEmailLog();
+    }
+
+    public void addSmsLog(SmsLogModel model) {
+        long entryBytes = estimateSmsLogBytes(model);
+        boolean shouldFlush;
+        synchronized (cache) {
+            cache.getSmsLogBatchList().add(model);
+            cache.smsQueueBytes += entryBytes;
+            shouldFlush = cache.getSmsLogBatchList().size() >= batchSize
+                    || cache.smsQueueBytes >= maxBatchBytes;
+        }
+        if (shouldFlush) flushSmsLog();
     }
 
     // ---- flush: REST access log ----
@@ -257,6 +293,88 @@ public class AccessLogBatchService {
         });
     }
 
+    // ---- flush: email log ----
+
+    public void flushEmailLog() {
+        if (!flushingEmailLog.compareAndSet(false, true)) return;
+
+        List<EmailLogModel> copy;
+        long copyBytes;
+        synchronized (cache) {
+            List<EmailLogModel> list = cache.getEmailLogBatchList();
+            if (list.isEmpty()) {
+                flushingEmailLog.set(false);
+                return;
+            }
+            copy = new ArrayList<>(list);
+            copyBytes = cache.emailQueueBytes;
+            list.clear();
+            cache.emailQueueBytes = 0L;
+        }
+
+        pool.execute(() -> {
+            try {
+                drainEmailRetry();
+                manager.insertEmailLogBatch(emailLogTable(), copy);
+            } catch (Exception e) {
+                if (fallback == null) {
+                    log.error("flushEmailLog() failed — buffering {} email entries ({} bytes) ({})",
+                            copy.size(), copyBytes, AccessLogWriter.errorType(e));
+                    addToEmailRetry(copy, copyBytes);
+                } else {
+                    // Email log is never written to the per-row outage INFO stream.
+                    log.error("flushEmailLog() failed — routing {} email entries ({} bytes) to fallback ({})",
+                            copy.size(), copyBytes, AccessLogWriter.errorType(e));
+                    List<EmailLogModel> left = fallback.offer(LogType.EMAIL, copy);
+                    if (!left.isEmpty()) addToEmailRetry(left, left == copy ? copyBytes : emailLogBytes(left));
+                }
+            } finally {
+                flushingEmailLog.set(false);
+            }
+        });
+    }
+
+    // ---- flush: sms log ----
+
+    public void flushSmsLog() {
+        if (!flushingSmsLog.compareAndSet(false, true)) return;
+
+        List<SmsLogModel> copy;
+        long copyBytes;
+        synchronized (cache) {
+            List<SmsLogModel> list = cache.getSmsLogBatchList();
+            if (list.isEmpty()) {
+                flushingSmsLog.set(false);
+                return;
+            }
+            copy = new ArrayList<>(list);
+            copyBytes = cache.smsQueueBytes;
+            list.clear();
+            cache.smsQueueBytes = 0L;
+        }
+
+        pool.execute(() -> {
+            try {
+                drainSmsRetry();
+                manager.insertSmsLogBatch(smsLogTable(), copy);
+            } catch (Exception e) {
+                if (fallback == null) {
+                    log.error("flushSmsLog() failed — buffering {} sms entries ({} bytes) ({})",
+                            copy.size(), copyBytes, AccessLogWriter.errorType(e));
+                    addToSmsRetry(copy, copyBytes);
+                } else {
+                    // SMS log is never written to the per-row outage INFO stream.
+                    log.error("flushSmsLog() failed — routing {} sms entries ({} bytes) to fallback ({})",
+                            copy.size(), copyBytes, AccessLogWriter.errorType(e));
+                    List<SmsLogModel> left = fallback.offer(LogType.SMS, copy);
+                    if (!left.isEmpty()) addToSmsRetry(left, left == copy ? copyBytes : smsLogBytes(left));
+                }
+            } finally {
+                flushingSmsLog.set(false);
+            }
+        });
+    }
+
     // ---- scheduled callbacks ----
 
     private void scheduledFlush() {
@@ -279,6 +397,20 @@ public class AccessLogBatchService {
             if (cache.getLoginReportBatchList().isEmpty()) return;
         }
         flushLoginReport();
+    }
+
+    private void scheduledFlushEmailLog() {
+        synchronized (cache) {
+            if (cache.getEmailLogBatchList().isEmpty()) return;
+        }
+        flushEmailLog();
+    }
+
+    private void scheduledFlushSmsLog() {
+        synchronized (cache) {
+            if (cache.getSmsLogBatchList().isEmpty()) return;
+        }
+        flushSmsLog();
     }
 
     // ---- retry buffer helpers ----
@@ -340,6 +472,44 @@ public class AccessLogBatchService {
         }
     }
 
+    private void drainEmailRetry() {
+        List<FailedBatch<EmailLogModel>> pending;
+        synchronized (emailRetry) {
+            if (emailRetry.isEmpty()) return;
+            pending = new ArrayList<>(emailRetry);
+            emailRetry.clear();
+            emailRetryBytes = 0L;
+        }
+        for (FailedBatch<EmailLogModel> batch : pending) {
+            try {
+                manager.insertEmailLogBatch(emailLogTable(), batch.entries);
+            } catch (Exception e) {
+                log.error("Retry flush failed for {} email entries ({} bytes) ({})",
+                        batch.entries.size(), batch.bytes, AccessLogWriter.errorType(e));
+                addToEmailRetry(batch.entries, batch.bytes);
+            }
+        }
+    }
+
+    private void drainSmsRetry() {
+        List<FailedBatch<SmsLogModel>> pending;
+        synchronized (smsRetry) {
+            if (smsRetry.isEmpty()) return;
+            pending = new ArrayList<>(smsRetry);
+            smsRetry.clear();
+            smsRetryBytes = 0L;
+        }
+        for (FailedBatch<SmsLogModel> batch : pending) {
+            try {
+                manager.insertSmsLogBatch(smsLogTable(), batch.entries);
+            } catch (Exception e) {
+                log.error("Retry flush failed for {} sms entries ({} bytes) ({})",
+                        batch.entries.size(), batch.bytes, AccessLogWriter.errorType(e));
+                addToSmsRetry(batch.entries, batch.bytes);
+            }
+        }
+    }
+
     private void addToRestRetry(List<RestAccessLogModel> entries, long bytes) {
         synchronized (restRetry) {
             restRetry.addLast(new FailedBatch<>(entries, bytes));
@@ -379,11 +549,39 @@ public class AccessLogBatchService {
         }
     }
 
+    private void addToEmailRetry(List<EmailLogModel> entries, long bytes) {
+        synchronized (emailRetry) {
+            emailRetry.addLast(new FailedBatch<>(entries, bytes));
+            emailRetryBytes += bytes;
+            while (emailRetryBytes > retryBufferMaxBytes && !emailRetry.isEmpty()) {
+                FailedBatch<EmailLogModel> oldest = emailRetry.pollFirst();
+                emailRetryBytes -= oldest.bytes;
+                log.warn("Email retry buffer over cap ({} bytes) — dropped {} entries ({} bytes)",
+                        retryBufferMaxBytes, oldest.entries.size(), oldest.bytes);
+            }
+        }
+    }
+
+    private void addToSmsRetry(List<SmsLogModel> entries, long bytes) {
+        synchronized (smsRetry) {
+            smsRetry.addLast(new FailedBatch<>(entries, bytes));
+            smsRetryBytes += bytes;
+            while (smsRetryBytes > retryBufferMaxBytes && !smsRetry.isEmpty()) {
+                FailedBatch<SmsLogModel> oldest = smsRetry.pollFirst();
+                smsRetryBytes -= oldest.bytes;
+                log.warn("SMS retry buffer over cap ({} bytes) — dropped {} entries ({} bytes)",
+                        retryBufferMaxBytes, oldest.entries.size(), oldest.bytes);
+            }
+        }
+    }
+
     // ---- table names ----
 
     private String restTable()        { return database + ".tbl_rest_access_log"; }
     private String accessTable()      { return database + ".tbl_access_log"; }
     private String loginReportTable() { return database + ".tbl_user_loggedin_report"; }
+    private String emailLogTable()    { return database + ".tbl_email_logs"; }
+    private String smsLogTable()      { return database + ".tbl_sms_logs"; }
 
     // ---- byte estimation ----
 
@@ -417,6 +615,35 @@ public class AccessLogBatchService {
         return bytes;
     }
 
+    private static long emailLogBytes(List<EmailLogModel> list) {
+        long total = 0L;
+        for (EmailLogModel m : list) total += estimateEmailLogBytes(m);
+        return total;
+    }
+
+    private static long estimateEmailLogBytes(EmailLogModel m) {
+        return len(m.getUserId()) + len(m.getEmail()) + len(m.getOtp()) + len(m.getEmailHost())
+                + len(m.getEmailPort()) + len(m.getEmailFrom()) + len(m.getEmailSubject())
+                + len(m.getEmailContent()) + len(m.getEmailResponse()) + len(m.getEmailStatus())
+                + len(m.getCreatedBy()) + len(m.getSource()) + len(m.getFiller());
+    }
+
+    private static long smsLogBytes(List<SmsLogModel> list) {
+        long total = 0L;
+        for (SmsLogModel m : list) total += estimateSmsLogBytes(m);
+        return total;
+    }
+
+    private static long estimateSmsLogBytes(SmsLogModel m) {
+        return len(m.getUserId()) + len(m.getMobile()) + len(m.getOtp()) + len(m.getUrl())
+                + len(m.getRequestMessage()) + len(m.getResponseMessage()) + len(m.getSentStatus())
+                + len(m.getCreatedBy()) + len(m.getSource()) + len(m.getFiller());
+    }
+
+    private static long len(String s) {
+        return s != null ? s.length() : 0L;
+    }
+
     // ---- lifecycle ----
 
     void scheduleDaily(Runnable task) {
@@ -428,6 +655,8 @@ public class AccessLogBatchService {
         flush();
         flushAccessLog();
         flushLoginReport();
+        flushEmailLog();
+        flushSmsLog();
         pool.shutdown();
         try {
             if (!pool.awaitTermination(30, TimeUnit.SECONDS)) {

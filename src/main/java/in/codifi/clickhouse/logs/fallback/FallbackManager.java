@@ -27,7 +27,9 @@ import org.slf4j.LoggerFactory;
 
 import in.codifi.clickhouse.logs.AccessLogWriter;
 import in.codifi.clickhouse.logs.model.AccessLogModel;
+import in.codifi.clickhouse.logs.model.EmailLogModel;
 import in.codifi.clickhouse.logs.model.RestAccessLogModel;
+import in.codifi.clickhouse.logs.model.SmsLogModel;
 import in.codifi.clickhouse.logs.model.UserLoginReportModel;
 import in.codifi.clickhouse.logs.util.MaskingUtil;
 
@@ -70,6 +72,8 @@ public final class FallbackManager {
     private final String restTable;
     private final String accessTable;
     private final String loginTable;
+    private final String emailTable;
+    private final String smsTable;
 
     private final AtomicLong    sizeBytes = new AtomicLong(0L);
     private final AtomicLong    counter   = new AtomicLong(0L);
@@ -99,6 +103,8 @@ public final class FallbackManager {
         this.restTable   = database + ".tbl_rest_access_log";
         this.accessTable = database + ".tbl_access_log";
         this.loginTable  = database + ".tbl_user_loggedin_report";
+        this.emailTable  = database + ".tbl_email_logs";
+        this.smsTable    = database + ".tbl_sms_logs";
 
         this.pid = currentPid();
         if (cfg.getInstanceName() != null) {
@@ -225,7 +231,8 @@ public final class FallbackManager {
     private boolean writeFile(LogType type, String module, List<?> rows) {
         long reserved = 0L;
         try {
-            boolean masked = maskingEnabled && type != LogType.LOGIN;
+            // Only access/rest carry req/res bodies; masking never applies to login/email/sms.
+            boolean masked = maskingEnabled && (type == LogType.ACCESS || type == LogType.REST);
             UnaryOperator<String> bodyMapper = masked ? MaskingUtil::maskJson : UnaryOperator.identity();
             byte[] data = FallbackCodec.encode(type, rows, masked, bodyMapper);
 
@@ -334,6 +341,8 @@ public final class FallbackManager {
         switch (d.type) {
             case ACCESS: w.insertAccessLogBatch(accessTable, (List<AccessLogModel>) d.rows);       break;
             case REST:   w.insertRestAccessLogBatch(restTable, (List<RestAccessLogModel>) d.rows); break;
+            case EMAIL:  w.insertEmailLogBatch(emailTable, (List<EmailLogModel>) d.rows);           break;
+            case SMS:    w.insertSmsLogBatch(smsTable, (List<SmsLogModel>) d.rows);                 break;
             default:     w.insertLoginReportBatch(loginTable, (List<UserLoginReportModel>) d.rows); break;
         }
     }
@@ -401,7 +410,7 @@ public final class FallbackManager {
         switch (type) {
             case ACCESS: module = ((AccessLogModel) row).getModule();     break;
             case REST:   module = ((RestAccessLogModel) row).getModule(); break;
-            default:     module = null;                                   break; // login rows have no module
+            default:     module = null;                                   break; // login/email/sms rows have no module
         }
         return sanitize(module);
     }

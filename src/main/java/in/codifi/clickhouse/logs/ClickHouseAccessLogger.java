@@ -8,7 +8,9 @@ import org.slf4j.LoggerFactory;
 import in.codifi.clickhouse.logs.fallback.FallbackConfig;
 import in.codifi.clickhouse.logs.fallback.FallbackManager;
 import in.codifi.clickhouse.logs.model.AccessLogModel;
+import in.codifi.clickhouse.logs.model.EmailLogModel;
 import in.codifi.clickhouse.logs.model.RestAccessLogModel;
+import in.codifi.clickhouse.logs.model.SmsLogModel;
 import in.codifi.clickhouse.logs.model.UserLoginReportModel;
 
 /**
@@ -155,6 +157,16 @@ public class ClickHouseAccessLogger {
     /** Enqueues a user login-report entry. */
     public void addLoginReport(UserLoginReportModel model) {
         batchService.addLoginReport(model);
+    }
+
+    /** Enqueues an email log entry (tbl_email_logs). */
+    public void addEmailLog(EmailLogModel model) {
+        batchService.addEmailLog(model);
+    }
+
+    /** Enqueues an SMS log entry (tbl_sms_logs). */
+    public void addSmsLog(SmsLogModel model) {
+        batchService.addSmsLog(model);
     }
 
     /** Flushes remaining entries and shuts down thread pools. Call once on shutdown. */

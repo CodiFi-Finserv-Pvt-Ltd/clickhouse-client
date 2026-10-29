@@ -29,6 +29,8 @@ public class AccessLogTableManager {
         ok &= execute(buildAccessLogDdl(), database + ".tbl_access_log");
         ok &= execute(buildRestAccessLogDdl(), database + ".tbl_rest_access_log");
         ok &= execute(buildUserLoginReportDdl(), database + ".tbl_user_loggedin_report");
+        ok &= execute(buildEmailLogDdl(), database + ".tbl_email_logs");
+        ok &= execute(buildSmsLogDdl(), database + ".tbl_sms_logs");
         return ok;
     }
 
@@ -102,6 +104,47 @@ public class AccessLogTableManager {
                 + " PARTITION BY toYYYYMM(`report_date`)"
                 + " ORDER BY (`report_date`, `user_id`, `source`)"
                 + " SETTINGS index_granularity = 8192";
+    }
+
+    private String buildEmailLogDdl() {
+        return "CREATE TABLE IF NOT EXISTS " + database + ".tbl_email_logs ("
+                + "`user_id` String, "
+                + "`email` Nullable(String), "
+                + "`otp` Nullable(String), "
+                + "`email_host` LowCardinality(Nullable(String)), "
+                + "`email_port` LowCardinality(Nullable(String)), "
+                + "`email_from` LowCardinality(Nullable(String)), "
+                + "`email_subject` String CODEC(ZSTD(3)), "
+                + "`email_content` String CODEC(ZSTD(3)), "
+                + "`email_response` String CODEC(ZSTD(3)), "
+                + "`email_status` LowCardinality(Nullable(String)), "
+                + "`created_on` DateTime DEFAULT now() CODEC(DoubleDelta, ZSTD(1)), "
+                + "`created_by` LowCardinality(Nullable(String)), "
+                + "`source` LowCardinality(Nullable(String)), "
+                + "`filler` Nullable(String)"
+                + ") ENGINE = MergeTree"
+                + " PARTITION BY toYYYYMM(`created_on`)"
+                + " ORDER BY (`created_on`, `user_id`)"
+                + " SETTINGS index_granularity = 8192, allow_nullable_key = 1";
+    }
+
+    private String buildSmsLogDdl() {
+        return "CREATE TABLE IF NOT EXISTS " + database + ".tbl_sms_logs ("
+                + "`user_id` String, "
+                + "`mobile` Nullable(String), "
+                + "`otp` Nullable(String), "
+                + "`url` String CODEC(ZSTD(3)), "
+                + "`request_message` String CODEC(ZSTD(3)), "
+                + "`response_message` String CODEC(ZSTD(3)), "
+                + "`sent_status` LowCardinality(Nullable(String)), "
+                + "`created_on` DateTime DEFAULT now() CODEC(DoubleDelta, ZSTD(1)), "
+                + "`created_by` LowCardinality(Nullable(String)), "
+                + "`source` LowCardinality(Nullable(String)), "
+                + "`filler` Nullable(String)"
+                + ") ENGINE = MergeTree"
+                + " PARTITION BY toYYYYMM(`created_on`)"
+                + " ORDER BY (`created_on`, `user_id`)"
+                + " SETTINGS index_granularity = 8192, allow_nullable_key = 1";
     }
 
     private boolean execute(String sql, String label) {

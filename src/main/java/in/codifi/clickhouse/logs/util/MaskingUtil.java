@@ -84,4 +84,11 @@ public class MaskingUtil {
         }
         return start + stars + end;
     }
+
+    private static final String OTP_MASK = "****";
+
+    /** Replaces any OTP with a fixed mask; null/empty is returned as-is. Idempotent. */
+    public static String maskOtp(String otp) {
+        return otp == null || otp.isEmpty() ? otp : OTP_MASK;
+    }
 }

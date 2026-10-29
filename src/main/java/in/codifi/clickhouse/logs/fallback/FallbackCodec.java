@@ -13,8 +13,11 @@ import org.json.simple.JSONObject;
 import org.json.simple.parser.JSONParser;
 
 import in.codifi.clickhouse.logs.model.AccessLogModel;
+import in.codifi.clickhouse.logs.model.EmailLogModel;
 import in.codifi.clickhouse.logs.model.RestAccessLogModel;
+import in.codifi.clickhouse.logs.model.SmsLogModel;
 import in.codifi.clickhouse.logs.model.UserLoginReportModel;
+import in.codifi.clickhouse.logs.util.MaskingUtil;
 
 /**
  * JSON Lines encoding of a failed batch.
@@ -63,6 +66,8 @@ final class FallbackCodec {
             switch (type) {
                 case ACCESS: o = encodeAccess((AccessLogModel) row, bodyMapper); break;
                 case REST:   o = encodeRest((RestAccessLogModel) row, bodyMapper); break;
+                case EMAIL:  o = encodeEmail((EmailLogModel) row);                 break;
+                case SMS:    o = encodeSms((SmsLogModel) row);                     break;
                 default:     o = encodeLogin((UserLoginReportModel) row);          break;
             }
             sb.append(o.toJSONString()).append('\n');
@@ -141,6 +146,41 @@ final class FallbackCodec {
         return o;
     }
 
+    @SuppressWarnings("unchecked")
+    private static JSONObject encodeEmail(EmailLogModel m) {
+        JSONObject o = new JSONObject();
+        o.put("userId", m.getUserId());
+        o.put("email", m.getEmail());
+        o.put("otp", MaskingUtil.maskOtp(m.getOtp())); // never write the real OTP to a fallback file
+        o.put("emailHost", m.getEmailHost());
+        o.put("emailPort", m.getEmailPort());
+        o.put("emailFrom", m.getEmailFrom());
+        o.put("emailSubject", m.getEmailSubject());
+        o.put("emailContent", m.getEmailContent());
+        o.put("emailResponse", m.getEmailResponse());
+        o.put("emailStatus", m.getEmailStatus());
+        o.put("createdBy", m.getCreatedBy());
+        o.put("source", m.getSource());
+        o.put("filler", m.getFiller());
+        return o;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static JSONObject encodeSms(SmsLogModel m) {
+        JSONObject o = new JSONObject();
+        o.put("userId", m.getUserId());
+        o.put("mobile", m.getMobile());
+        o.put("otp", MaskingUtil.maskOtp(m.getOtp())); // never write the real OTP to a fallback file
+        o.put("url", m.getUrl());
+        o.put("requestMessage", m.getRequestMessage());
+        o.put("responseMessage", m.getResponseMessage());
+        o.put("sentStatus", m.getSentStatus());
+        o.put("createdBy", m.getCreatedBy());
+        o.put("source", m.getSource());
+        o.put("filler", m.getFiller());
+        return o;
+    }
+
     // ---- decode ----
 
     /** Throws on any malformed content; the caller quarantines the file. */
@@ -167,6 +207,8 @@ final class FallbackCodec {
                 switch (type) {
                     case ACCESS: rows.add(decodeAccess(o)); break;
                     case REST:   rows.add(decodeRest(o));   break;
+                    case EMAIL:  rows.add(decodeEmail(o));  break;
+                    case SMS:    rows.add(decodeSms(o));    break;
                     default:     rows.add(decodeLogin(o));  break;
                 }
             }
@@ -233,6 +275,39 @@ final class FallbackCodec {
         m.setSource(str(o, "source"));
         m.setVendor(str(o, "vendor"));
         m.setVisitors(integer(o, "visitors"));
+        return m;
+    }
+
+    private static EmailLogModel decodeEmail(JSONObject o) {
+        EmailLogModel m = new EmailLogModel();
+        m.setUserId(str(o, "userId"));
+        m.setEmail(str(o, "email"));
+        m.setOtp(str(o, "otp"));
+        m.setEmailHost(str(o, "emailHost"));
+        m.setEmailPort(str(o, "emailPort"));
+        m.setEmailFrom(str(o, "emailFrom"));
+        m.setEmailSubject(str(o, "emailSubject"));
+        m.setEmailContent(str(o, "emailContent"));
+        m.setEmailResponse(str(o, "emailResponse"));
+        m.setEmailStatus(str(o, "emailStatus"));
+        m.setCreatedBy(str(o, "createdBy"));
+        m.setSource(str(o, "source"));
+        m.setFiller(str(o, "filler"));
+        return m;
+    }
+
+    private static SmsLogModel decodeSms(JSONObject o) {
+        SmsLogModel m = new SmsLogModel();
+        m.setUserId(str(o, "userId"));
+        m.setMobile(str(o, "mobile"));
+        m.setOtp(str(o, "otp"));
+        m.setUrl(str(o, "url"));
+        m.setRequestMessage(str(o, "requestMessage"));
+        m.setResponseMessage(str(o, "responseMessage"));
+        m.setSentStatus(str(o, "sentStatus"));
+        m.setCreatedBy(str(o, "createdBy"));
+        m.setSource(str(o, "source"));
+        m.setFiller(str(o, "filler"));
         return m;
     }
 

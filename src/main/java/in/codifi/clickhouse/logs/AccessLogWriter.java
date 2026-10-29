@@ -11,7 +11,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import in.codifi.clickhouse.logs.model.AccessLogModel;
+import in.codifi.clickhouse.logs.model.EmailLogModel;
 import in.codifi.clickhouse.logs.model.RestAccessLogModel;
+import in.codifi.clickhouse.logs.model.SmsLogModel;
 import in.codifi.clickhouse.logs.model.UserLoginReportModel;
 import in.codifi.clickhouse.logs.util.CommonUtils;
 import in.codifi.clickhouse.logs.util.MaskingUtil;
@@ -270,6 +272,128 @@ public class AccessLogWriter {
         SafeBind.bindString(ps, i++, entry::getSource, tableName, "source");            //  2
         SafeBind.bindNullableString(ps, i++, entry::getVendor, tableName, "vendor");     //  3
         SafeBind.bindInt(ps, i++, entry::getVisitors, tableName, "visitors");            //  4
+    }
+
+    // -----------------------------------------------------------------
+    // tbl_email_logs  — 13 INSERT cols; created_on defaults in ClickHouse
+    //
+    // CREATE order (insertable):
+    //  1  user_id        6  email_from       11 created_by
+    //  2  email          7  email_subject    12 source
+    //  3  otp            8  email_content    13 filler
+    //  4  email_host     9  email_response
+    //  5  email_port    10  email_status
+    // -----------------------------------------------------------------
+    public void insertEmailLogBatch(String tableName, List<EmailLogModel> logs) {
+        if (logs == null || logs.isEmpty()) return;
+
+        String query = "INSERT INTO " + tableName
+                + " (user_id, email, otp, email_host, email_port, email_from, email_subject,"
+                + " email_content, email_response, email_status, created_by, source, filler)"
+                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)";
+
+        try (Connection conn = ds.getConnection(); PreparedStatement ps = conn.prepareStatement(query)) {
+
+            int failedRows = 0;
+            for (EmailLogModel entry : logs) {
+                try {
+                    bindEmailLogRow(ps, tableName, entry);
+                    ps.addBatch();
+                } catch (Exception rowEx) {
+                    failedRows++;
+                    log.warn("Skipping unmappable row for {} ({})", tableName, errorType(rowEx));
+                    log.debug("Unmappable row detail for {}", tableName, rowEx);
+                }
+            }
+            if (failedRows == logs.size()) {
+                throw new RuntimeException("All " + failedRows + " rows failed to bind for " + tableName);
+            }
+
+            ps.executeBatch();
+
+        } catch (Exception e) {
+            log.error("insertEmailLogBatch failed for table {} — {} rows ({})",
+                    tableName, logs.size(), errorType(e));
+            log.debug("insertEmailLogBatch failure detail for table {}", tableName, e);
+            throw new RuntimeException(e);
+        }
+    }
+
+    private void bindEmailLogRow(PreparedStatement ps, String tableName, EmailLogModel entry)
+            throws Exception {
+        int i = 1;
+        SafeBind.bindString(ps, i++, entry::getUserId, tableName, "user_id");                 //  1
+        SafeBind.bindNullableString(ps, i++, entry::getEmail, tableName, "email");             //  2
+        SafeBind.bindNullableString(ps, i++, () -> MaskingUtil.maskOtp(entry.getOtp()), tableName, "otp"); //  3
+        SafeBind.bindNullableString(ps, i++, entry::getEmailHost, tableName, "email_host");    //  4
+        SafeBind.bindNullableString(ps, i++, entry::getEmailPort, tableName, "email_port");    //  5
+        SafeBind.bindNullableString(ps, i++, entry::getEmailFrom, tableName, "email_from");    //  6
+        SafeBind.bindString(ps, i++, entry::getEmailSubject, tableName, "email_subject");      //  7
+        SafeBind.bindString(ps, i++, entry::getEmailContent, tableName, "email_content");      //  8
+        SafeBind.bindString(ps, i++, entry::getEmailResponse, tableName, "email_response");    //  9
+        SafeBind.bindNullableString(ps, i++, entry::getEmailStatus, tableName, "email_status"); // 10
+        SafeBind.bindNullableString(ps, i++, entry::getCreatedBy, tableName, "created_by");    // 11
+        SafeBind.bindNullableString(ps, i++, entry::getSource, tableName, "source");           // 12
+        SafeBind.bindNullableString(ps, i++, entry::getFiller, tableName, "filler");           // 13
+    }
+
+    // -----------------------------------------------------------------
+    // tbl_sms_logs  — 10 INSERT cols; created_on defaults in ClickHouse
+    //
+    // CREATE order (insertable):
+    //  1  user_id    5  request_message    9  source
+    //  2  mobile     6  response_message  10  filler
+    //  3  otp        7  sent_status
+    //  4  url        8  created_by
+    // -----------------------------------------------------------------
+    public void insertSmsLogBatch(String tableName, List<SmsLogModel> logs) {
+        if (logs == null || logs.isEmpty()) return;
+
+        String query = "INSERT INTO " + tableName
+                + " (user_id, mobile, otp, url, request_message, response_message,"
+                + " sent_status, created_by, source, filler)"
+                + " VALUES (?,?,?,?,?,?,?,?,?,?)";
+
+        try (Connection conn = ds.getConnection(); PreparedStatement ps = conn.prepareStatement(query)) {
+
+            int failedRows = 0;
+            for (SmsLogModel entry : logs) {
+                try {
+                    bindSmsLogRow(ps, tableName, entry);
+                    ps.addBatch();
+                } catch (Exception rowEx) {
+                    failedRows++;
+                    log.warn("Skipping unmappable row for {} ({})", tableName, errorType(rowEx));
+                    log.debug("Unmappable row detail for {}", tableName, rowEx);
+                }
+            }
+            if (failedRows == logs.size()) {
+                throw new RuntimeException("All " + failedRows + " rows failed to bind for " + tableName);
+            }
+
+            ps.executeBatch();
+
+        } catch (Exception e) {
+            log.error("insertSmsLogBatch failed for table {} — {} rows ({})",
+                    tableName, logs.size(), errorType(e));
+            log.debug("insertSmsLogBatch failure detail for table {}", tableName, e);
+            throw new RuntimeException(e);
+        }
+    }
+
+    private void bindSmsLogRow(PreparedStatement ps, String tableName, SmsLogModel entry)
+            throws Exception {
+        int i = 1;
+        SafeBind.bindString(ps, i++, entry::getUserId, tableName, "user_id");                       //  1
+        SafeBind.bindNullableString(ps, i++, entry::getMobile, tableName, "mobile");                 //  2
+        SafeBind.bindNullableString(ps, i++, () -> MaskingUtil.maskOtp(entry.getOtp()), tableName, "otp"); //  3
+        SafeBind.bindString(ps, i++, entry::getUrl, tableName, "url");                               //  4
+        SafeBind.bindString(ps, i++, entry::getRequestMessage, tableName, "request_message");        //  5
+        SafeBind.bindString(ps, i++, entry::getResponseMessage, tableName, "response_message");      //  6
+        SafeBind.bindNullableString(ps, i++, entry::getSentStatus, tableName, "sent_status");        //  7
+        SafeBind.bindNullableString(ps, i++, entry::getCreatedBy, tableName, "created_by");          //  8
+        SafeBind.bindNullableString(ps, i++, entry::getSource, tableName, "source");                 //  9
+        SafeBind.bindNullableString(ps, i++, entry::getFiller, tableName, "filler");                 // 10
     }
 
     /**

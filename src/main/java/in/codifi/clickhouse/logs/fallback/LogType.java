@@ -5,7 +5,9 @@ public enum LogType {
 
     ACCESS("access"),
     REST("rest_access"),
-    LOGIN("login");
+    LOGIN("login"),
+    EMAIL("email"),
+    SMS("sms");
 
     private final String dir;
 
@@ -17,7 +19,7 @@ public enum LogType {
         return dir;
     }
 
-    /** Accepts the config spellings: access | rest | rest_access | login (case-insensitive). */
+    /** Accepts the config spellings: access | rest | rest_access | login | email | sms (case-insensitive). */
     static LogType fromConfig(String value) {
         if (value == null) return null;
         switch (value.trim().toLowerCase()) {
@@ -25,6 +27,8 @@ public enum LogType {
             case "rest":
             case "rest_access": return REST;
             case "login":       return LOGIN;
+            case "email":       return EMAIL;
+            case "sms":         return SMS;
             default:            return null;
         }
     }
