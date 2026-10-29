@@ -33,6 +33,7 @@ public class FallbackConfig {
     private int          recoveryIntervalSeconds = 300;
     private Set<LogType> logTypes                = EnumSet.of(LogType.ACCESS, LogType.REST);
     private String       instanceName;
+    private boolean      outageLogInfo           = false; // per-row INFO for access/rest during an outage
 
     private String diskBasePath;
 
@@ -73,7 +74,8 @@ public class FallbackConfig {
             String types              = trimToNull(source.apply(PREFIX + "log.types"));
             if (types != null) c.setLogTypes(types);
             c.instanceName            = trimToNull(source.apply(PREFIX + "instance.name"));
-            c.diskBasePath            = trimToNull(source.apply(PREFIX + "disk.base.path"));
+            c.outageLogInfo           = parseBoolean(source, "outage.loginfo", false);
+            c.diskBasePath           = trimToNull(source.apply(PREFIX + "disk.base.path"));
             c.s3Endpoint              = trimToNull(source.apply(PREFIX + "s3.endpoint"));
             c.s3Bucket                = trimToNull(source.apply(PREFIX + "s3.bucket"));
             c.s3BasePath              = trimToNull(source.apply(PREFIX + "s3.base.path"));
@@ -93,6 +95,7 @@ public class FallbackConfig {
     public FallbackConfig setType(String type)                   { this.type = trimToNull(type); return this; }
     public FallbackConfig setMaxSizeMb(Long maxSizeMb)           { this.maxSizeMb = maxSizeMb; return this; }
     public FallbackConfig setInstanceName(String instanceName)   { this.instanceName = trimToNull(instanceName); return this; }
+    public FallbackConfig setOutageLogInfo(boolean outageLogInfo) { this.outageLogInfo = outageLogInfo; return this; }
     public FallbackConfig setDiskBasePath(String diskBasePath)   { this.diskBasePath = trimToNull(diskBasePath); return this; }
     public FallbackConfig setS3Endpoint(String s3Endpoint)       { this.s3Endpoint = trimToNull(s3Endpoint); return this; }
     public FallbackConfig setS3Bucket(String s3Bucket)           { this.s3Bucket = trimToNull(s3Bucket); return this; }
@@ -129,6 +132,7 @@ public class FallbackConfig {
     public int          getRecoveryIntervalSeconds() { return recoveryIntervalSeconds; }
     public Set<LogType> getLogTypes()                { return Collections.unmodifiableSet(logTypes); }
     public String       getInstanceName()            { return instanceName; }
+    public boolean      isOutageLogInfo()            { return outageLogInfo; }
     public String       getDiskBasePath()            { return diskBasePath; }
     public String       getS3Endpoint()              { return s3Endpoint; }
     public String       getS3Bucket()                { return s3Bucket; }
@@ -142,7 +146,7 @@ public class FallbackConfig {
     public String toString() {
         return "FallbackConfig{enabled=" + enabled + ", type=" + type + ", maxSizeMb=" + maxSizeMb
                 + ", recoveryIntervalSeconds=" + recoveryIntervalSeconds + ", logTypes=" + logTypes
-                + ", instanceName=" + instanceName + ", diskBasePath=" + diskBasePath
+                + ", instanceName=" + instanceName + ", outageLogInfo=" + outageLogInfo + ", diskBasePath=" + diskBasePath
                 + ", s3Endpoint=" + s3Endpoint + ", s3Bucket=" + s3Bucket + ", s3BasePath=" + s3BasePath
                 + ", s3Region=" + s3Region + "}";
     }

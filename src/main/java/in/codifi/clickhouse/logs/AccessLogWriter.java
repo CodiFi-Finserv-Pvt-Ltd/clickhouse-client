@@ -70,7 +70,8 @@ public class AccessLogWriter {
                     ps.addBatch();
                 } catch (Exception rowEx) {
                     failedRows++;
-                    log.warn("Skipping unmappable row for {}: {}", tableName, rowEx.getMessage());
+                    log.warn("Skipping unmappable row for {} ({})", tableName, errorType(rowEx));
+                    log.debug("Unmappable row detail for {}", tableName, rowEx);
                 }
             }
             if (failedRows == logs.size()) {
@@ -80,7 +81,9 @@ public class AccessLogWriter {
             ps.executeBatch();
 
         } catch (Exception e) {
-            log.error("insertRestAccessLogBatch failed for table {}", tableName, e);
+            log.error("insertRestAccessLogBatch failed for table {} — {} rows ({})",
+                    tableName, logs.size(), errorType(e));
+            log.debug("insertRestAccessLogBatch failure detail for table {}", tableName, e);
             throw new RuntimeException(e);
         }
     }
@@ -158,7 +161,8 @@ public class AccessLogWriter {
                     statement.addBatch();
                 } catch (Exception rowEx) {
                     failedRows++;
-                    log.warn("Skipping unmappable row for {}: {}", tableName, rowEx.getMessage());
+                    log.warn("Skipping unmappable row for {} ({})", tableName, errorType(rowEx));
+                    log.debug("Unmappable row detail for {}", tableName, rowEx);
                 }
             }
             if (failedRows == batchLogs.size()) {
@@ -168,7 +172,9 @@ public class AccessLogWriter {
             statement.executeBatch();
 
         } catch (Exception e) {
-            log.error("insertAccessLogBatch failed for table {}", tableName, e);
+            log.error("insertAccessLogBatch failed for table {} — {} rows ({})",
+                    tableName, batchLogs.size(), errorType(e));
+            log.debug("insertAccessLogBatch failure detail for table {}", tableName, e);
             throw new RuntimeException(e);
         }
     }
@@ -239,7 +245,8 @@ public class AccessLogWriter {
                     ps.addBatch();
                 } catch (Exception rowEx) {
                     failedRows++;
-                    log.warn("Skipping unmappable row for {}: {}", tableName, rowEx.getMessage());
+                    log.warn("Skipping unmappable row for {} ({})", tableName, errorType(rowEx));
+                    log.debug("Unmappable row detail for {}", tableName, rowEx);
                 }
             }
             if (failedRows == logs.size()) {
@@ -249,7 +256,9 @@ public class AccessLogWriter {
             ps.executeBatch();
 
         } catch (Exception e) {
-            log.error("insertLoginReportBatch failed for table {}", tableName, e);
+            log.error("insertLoginReportBatch failed for table {} — {} rows ({})",
+                    tableName, logs.size(), errorType(e));
+            log.debug("insertLoginReportBatch failure detail for table {}", tableName, e);
             throw new RuntimeException(e);
         }
     }
@@ -261,5 +270,15 @@ public class AccessLogWriter {
         SafeBind.bindString(ps, i++, entry::getSource, tableName, "source");            //  2
         SafeBind.bindNullableString(ps, i++, entry::getVendor, tableName, "vendor");     //  3
         SafeBind.bindInt(ps, i++, entry::getVisitors, tableName, "visitors");            //  4
+    }
+
+    /**
+     * Root-cause class name only. Driver/server messages can quote the INSERT text (i.e. row
+     * values), so failure logs use this instead of the exception message or stack trace.
+     */
+    public static String errorType(Throwable t) {
+        Throwable root = t;
+        while (root.getCause() != null && root.getCause() != root) root = root.getCause();
+        return root.getClass().getSimpleName();
     }
 }

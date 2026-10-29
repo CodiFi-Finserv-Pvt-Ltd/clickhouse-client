@@ -159,10 +159,13 @@ public class AccessLogBatchService {
                 manager.insertRestAccessLogBatch(restTable(), copy);
             } catch (Exception e) {
                 if (fallback == null) {
-                    log.error("flush() failed — buffering {} REST entries ({} bytes)", copy.size(), copyBytes, e);
+                    log.error("flush() failed — buffering {} REST entries ({} bytes) ({})",
+                            copy.size(), copyBytes, AccessLogWriter.errorType(e));
                     addToRestRetry(copy, copyBytes);
                 } else {
-                    log.error("flush() failed — routing {} REST entries ({} bytes) to fallback", copy.size(), copyBytes, e);
+                    log.error("flush() failed — routing {} REST entries ({} bytes) to fallback ({})",
+                            copy.size(), copyBytes, AccessLogWriter.errorType(e));
+                    fallback.logOutageRows(LogType.REST, copy);
                     List<RestAccessLogModel> left = fallback.offer(LogType.REST, copy);
                     if (!left.isEmpty()) addToRestRetry(left, left == copy ? copyBytes : restBytes(left));
                 }
@@ -197,10 +200,13 @@ public class AccessLogBatchService {
                 manager.insertAccessLogBatch(accessTable(), copy);
             } catch (Exception e) {
                 if (fallback == null) {
-                    log.error("flushAccessLog() failed — buffering {} access entries ({} bytes)", copy.size(), copyBytes, e);
+                    log.error("flushAccessLog() failed — buffering {} access entries ({} bytes) ({})",
+                            copy.size(), copyBytes, AccessLogWriter.errorType(e));
                     addToAccessRetry(copy, copyBytes);
                 } else {
-                    log.error("flushAccessLog() failed — routing {} access entries ({} bytes) to fallback", copy.size(), copyBytes, e);
+                    log.error("flushAccessLog() failed — routing {} access entries ({} bytes) to fallback ({})",
+                            copy.size(), copyBytes, AccessLogWriter.errorType(e));
+                    fallback.logOutageRows(LogType.ACCESS, copy);
                     List<AccessLogModel> left = fallback.offer(LogType.ACCESS, copy);
                     if (!left.isEmpty()) addToAccessRetry(left, left == copy ? copyBytes : accessBytes(left));
                 }
@@ -235,10 +241,13 @@ public class AccessLogBatchService {
                 manager.insertLoginReportBatch(loginReportTable(), copy);
             } catch (Exception e) {
                 if (fallback == null) {
-                    log.error("flushLoginReport() failed — buffering {} login-report entries ({} bytes)", copy.size(), copyBytes, e);
+                    log.error("flushLoginReport() failed — buffering {} login-report entries ({} bytes) ({})",
+                            copy.size(), copyBytes, AccessLogWriter.errorType(e));
                     addToLoginReportRetry(copy, copyBytes);
                 } else {
-                    log.error("flushLoginReport() failed — routing {} login-report entries ({} bytes) to fallback", copy.size(), copyBytes, e);
+                    // Login report is never written to the per-row outage INFO stream.
+                    log.error("flushLoginReport() failed — routing {} login-report entries ({} bytes) to fallback ({})",
+                            copy.size(), copyBytes, AccessLogWriter.errorType(e));
                     List<UserLoginReportModel> left = fallback.offer(LogType.LOGIN, copy);
                     if (!left.isEmpty()) addToLoginReportRetry(left, left == copy ? copyBytes : loginReportBytes(left));
                 }
@@ -286,7 +295,8 @@ public class AccessLogBatchService {
             try {
                 manager.insertRestAccessLogBatch(restTable(), batch.entries);
             } catch (Exception e) {
-                log.error("Retry flush failed for {} REST entries ({} bytes)", batch.entries.size(), batch.bytes, e);
+                log.error("Retry flush failed for {} REST entries ({} bytes) ({})",
+                        batch.entries.size(), batch.bytes, AccessLogWriter.errorType(e));
                 addToRestRetry(batch.entries, batch.bytes);
             }
         }
@@ -304,7 +314,8 @@ public class AccessLogBatchService {
             try {
                 manager.insertAccessLogBatch(accessTable(), batch.entries);
             } catch (Exception e) {
-                log.error("Retry flush failed for {} access entries ({} bytes)", batch.entries.size(), batch.bytes, e);
+                log.error("Retry flush failed for {} access entries ({} bytes) ({})",
+                        batch.entries.size(), batch.bytes, AccessLogWriter.errorType(e));
                 addToAccessRetry(batch.entries, batch.bytes);
             }
         }
@@ -322,7 +333,8 @@ public class AccessLogBatchService {
             try {
                 manager.insertLoginReportBatch(loginReportTable(), batch.entries);
             } catch (Exception e) {
-                log.error("Retry flush failed for {} login-report entries ({} bytes)", batch.entries.size(), batch.bytes, e);
+                log.error("Retry flush failed for {} login-report entries ({} bytes) ({})",
+                        batch.entries.size(), batch.bytes, AccessLogWriter.errorType(e));
                 addToLoginReportRetry(batch.entries, batch.bytes);
             }
         }

@@ -44,6 +44,9 @@ public final class FallbackManager {
 
     private static final Logger log = LoggerFactory.getLogger(FallbackManager.class);
 
+    /** Per-row outage stream (access/rest only), so it can be routed or filtered on its own. */
+    private static final Logger outageLog = LoggerFactory.getLogger("in.codifi.clickhouse.logs.outage");
+
     private static final String            SUFFIX          = ".jsonl";
     private static final String            UNKNOWN         = "unknown";
     private static final int               FIRST_CYCLE_SEC = 10;
@@ -54,6 +57,7 @@ public final class FallbackManager {
     private final AccessLogWriter writer;    // masks bodies when maskingEnabled
     private final AccessLogWriter rawWriter; // never masks — for files whose bodies are already masked
     private final boolean         maskingEnabled;
+    private final boolean         outageLogInfo;
     private final Set<LogType>    logTypes;
     private final long            maxBytes;
     private final int             intervalSeconds;
@@ -80,6 +84,7 @@ public final class FallbackManager {
         this.writer         = new AccessLogWriter(ds, maskingEnabled);
         this.rawWriter      = new AccessLogWriter(ds, false);
         this.maskingEnabled = maskingEnabled;
+        this.outageLogInfo  = cfg.isOutageLogInfo();
         this.logTypes       = cfg.getLogTypes();
         this.maxBytes       = cfg.getMaxSizeMb() * 1024L * 1024L;
 
@@ -174,6 +179,23 @@ public final class FallbackManager {
     }
 
     // ---- write path ----
+
+    /**
+     * When {@code clickhouse.fallback.outage.loginfo} is on, logs every row of a failed ACCESS/REST
+     * batch at INFO (one JSON line each, bodies masked like the fallback file) so the rows reach the
+     * log pipeline even if the pod dies before they are replayed. LOGIN is never logged. Never throws.
+     */
+    public void logOutageRows(LogType type, List<?> rows) {
+        if (!outageLogInfo || rows == null || (type != LogType.ACCESS && type != LogType.REST)) return;
+        UnaryOperator<String> bodyMapper = maskingEnabled ? MaskingUtil::maskJson : UnaryOperator.identity();
+        for (Object row : rows) {
+            try {
+                outageLog.info("ClickHouse outage {} log: {}", type.dir(), FallbackCodec.encodeRow(type, row, bodyMapper));
+            } catch (Throwable t) {
+                log.warn("Could not write outage INFO for a {} row ({})", type.dir(), t.getClass().getSimpleName());
+            }
+        }
+    }
 
     /**
      * Stores the batch, one file per module. Returns the rows that could NOT be stored (empty when
@@ -280,7 +302,8 @@ public final class FallbackManager {
                     insert(decoded);
                 } catch (Exception ex) {
                     log.warn("Replay of fallback file {} failed ({}); {} file(s) left for next cycle",
-                            e.path, ex.toString(), own.size() - files);
+                            e.path, AccessLogWriter.errorType(ex), own.size() - files);
+                    log.debug("Replay failure detail for fallback file {}", e.path, ex);
                     return;
                 }
 
@@ -299,7 +322,8 @@ public final class FallbackManager {
                 log.info("Fallback recovery replayed {} file(s), {} rows, into ClickHouse", files, rows);
             }
         } catch (Throwable t) {
-            log.error("Fallback recovery cycle failed: {}", t.toString(), t);
+            log.error("Fallback recovery cycle failed ({})", AccessLogWriter.errorType(t));
+            log.debug("Fallback recovery cycle failure detail", t);
         }
     }
 

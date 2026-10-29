@@ -70,6 +70,15 @@ final class FallbackCodec {
         return sb.toString().getBytes(StandardCharsets.UTF_8);
     }
 
+    /** One access/rest row as a single-line JSON string, same fields as a fallback file row. */
+    static String encodeRow(LogType type, Object row, UnaryOperator<String> bodyMapper) {
+        switch (type) {
+            case ACCESS: return encodeAccess((AccessLogModel) row, bodyMapper).toJSONString();
+            case REST:   return encodeRest((RestAccessLogModel) row, bodyMapper).toJSONString();
+            default:     throw new IllegalArgumentException("encodeRow supports access/rest only");
+        }
+    }
+
     @SuppressWarnings("unchecked")
     private static JSONObject encodeAccess(AccessLogModel m, UnaryOperator<String> bodyMapper) {
         JSONObject o = new JSONObject();
