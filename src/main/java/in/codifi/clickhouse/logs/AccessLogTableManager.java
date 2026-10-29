@@ -31,6 +31,7 @@ public class AccessLogTableManager {
         ok &= execute(buildUserLoginReportDdl(), database + ".tbl_user_loggedin_report");
         ok &= execute(buildEmailLogDdl(), database + ".tbl_email_logs");
         ok &= execute(buildSmsLogDdl(), database + ".tbl_sms_logs");
+        ok &= execute(buildOrderDetailDdl(), database + ".tbl_order_details");
         return ok;
     }
 
@@ -144,6 +145,66 @@ public class AccessLogTableManager {
                 + ") ENGINE = MergeTree"
                 + " PARTITION BY toYYYYMM(`created_on`)"
                 + " ORDER BY (`created_on`, `user_id`)"
+                + " SETTINGS index_granularity = 8192, allow_nullable_key = 1";
+    }
+
+    private String buildOrderDetailDdl() {
+        return "CREATE TABLE IF NOT EXISTS " + database + ".tbl_order_details ("
+                + "`user_id` String, "
+                + "`acc_id` Nullable(String), "
+                + "`user` Nullable(String), "
+                + "`token` Nullable(String), "
+                + "`exchange` LowCardinality(Nullable(String)), "
+                + "`trading_symbol` LowCardinality(Nullable(String)), "
+                + "`action` LowCardinality(Nullable(String)), "
+                + "`trans_type` LowCardinality(Nullable(String)), "
+                + "`product` LowCardinality(Nullable(String)), "
+                + "`validity` LowCardinality(Nullable(String)), "
+                + "`prc_type` LowCardinality(Nullable(String)), "
+                + "`order_type` LowCardinality(Nullable(String)), "
+                + "`customer_firm` LowCardinality(Nullable(String)), "
+                + "`qty` Nullable(Decimal(18,6)), "
+                + "`price` Nullable(Decimal(18,6)), "
+                + "`trigger_price` Nullable(Decimal(18,6)), "
+                + "`disc_qty` Nullable(Decimal(18,6)), "
+                + "`cancelled_size` Nullable(Decimal(18,6)), "
+                + "`mkt_protection_price` Nullable(Decimal(18,6)), "
+                + "`order_no` Nullable(String), "
+                + "`target` Nullable(Decimal(18,6)), "
+                + "`stop_loss_value` Nullable(Decimal(18,6)), "
+                + "`trailing_stop_loss` Nullable(Decimal(18,6)), "
+                + "`tick_size` Nullable(Decimal(18,6)), "
+                + "`ltp_or_atp` Nullable(String), "
+                + "`sqr_off_abs_or_tick` Nullable(String), "
+                + "`slabs_or_tick` Nullable(String), "
+                + "`trail_tick_yes_no` LowCardinality(Nullable(String)), "
+                + "`classification` LowCardinality(Nullable(String)), "
+                + "`vendor_code` LowCardinality(Nullable(String)), "
+                + "`flag_to_add_category` Nullable(String), "
+                + "`order_criteria` Nullable(String), "
+                + "`pos_sqr_off_flag` Nullable(String), "
+                + "`algo_id` Nullable(String), "
+                + "`order_tag` Nullable(String), "
+                + "`comments` Nullable(String), "
+                + "`source` LowCardinality(Nullable(String)), "
+                + "`method` LowCardinality(Nullable(String)), "
+                + "`module` LowCardinality(Nullable(String)), "
+                + "`device_ip` Nullable(String), "
+                + "`device_id` Nullable(String), "
+                + "`status` LowCardinality(Nullable(String)), "
+                + "`rej_reason` Nullable(String), "
+                + "`active_status` Nullable(Int8), "
+                + "`created_on` DateTime DEFAULT now() CODEC(DoubleDelta, ZSTD(1)), "
+                + "`created_by` LowCardinality(Nullable(String)), "
+                + "`app_code` LowCardinality(Nullable(String)), "
+                + "`source_platform` LowCardinality(Nullable(String)), "
+                + "`filler1` Nullable(String), "
+                + "`filler2` Nullable(String), "
+                + "`filler3` Nullable(String), "
+                + "`filler4` Nullable(String)"
+                + ") ENGINE = MergeTree"
+                + " PARTITION BY toYYYYMMDD(`created_on`)"
+                + " ORDER BY (`created_on`, `user_id`, `order_no`)"
                 + " SETTINGS index_granularity = 8192, allow_nullable_key = 1";
     }
 

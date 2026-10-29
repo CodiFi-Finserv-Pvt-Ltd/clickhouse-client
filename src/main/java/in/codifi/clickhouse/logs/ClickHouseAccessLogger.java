@@ -9,6 +9,7 @@ import in.codifi.clickhouse.logs.fallback.FallbackConfig;
 import in.codifi.clickhouse.logs.fallback.FallbackManager;
 import in.codifi.clickhouse.logs.model.AccessLogModel;
 import in.codifi.clickhouse.logs.model.EmailLogModel;
+import in.codifi.clickhouse.logs.model.OrderDetailModel;
 import in.codifi.clickhouse.logs.model.RestAccessLogModel;
 import in.codifi.clickhouse.logs.model.SmsLogModel;
 import in.codifi.clickhouse.logs.model.UserLoginReportModel;
@@ -167,6 +168,11 @@ public class ClickHouseAccessLogger {
     /** Enqueues an SMS log entry (tbl_sms_logs). */
     public void addSmsLog(SmsLogModel model) {
         batchService.addSmsLog(model);
+    }
+
+    /** Enqueues an order-details entry (tbl_order_details). */
+    public void addOrderDetail(OrderDetailModel model) {
+        batchService.addOrderDetail(model);
     }
 
     /** Flushes remaining entries and shuts down thread pools. Call once on shutdown. */

@@ -1,5 +1,7 @@
 package in.codifi.clickhouse.logs.util;
 
+import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.sql.Types;
@@ -66,6 +68,51 @@ public final class SafeBind {
         Long value = safeGet(supplier, table, column);
         if (value != null) ps.setLong(idx, value);
         else                ps.setNull(idx, Types.BIGINT);
+    }
+
+    /**
+     * Nullable(Decimal(precision, scale)) column fed from a String. Null/blank, non-numeric, or
+     * out-of-range values bind as NULL (WARN once per table+column, value never logged) — an
+     * out-of-range literal would otherwise make ClickHouse reject the whole batch.
+     */
+    public static void bindNullableDecimal(PreparedStatement ps, int idx, ValueSupplier<String> supplier,
+            String table, String column, int precision, int scale) throws SQLException {
+        String raw = safeGet(supplier, table, column);
+        BigDecimal value = null;
+        if (raw != null && !raw.trim().isEmpty()) {
+            try {
+                value = new BigDecimal(raw.trim()).setScale(scale, RoundingMode.HALF_UP);
+                if (value.precision() > precision) value = null;
+            } catch (NumberFormatException | ArithmeticException e) {
+                value = null;
+            }
+            if (value == null) warnUnparseable(table, column);
+        }
+        if (value != null) ps.setBigDecimal(idx, value);
+        else               ps.setNull(idx, Types.DECIMAL);
+    }
+
+    /** Nullable(Int8) column fed from a String. Whole numbers in [-128, 127] only; anything else binds NULL. */
+    public static void bindNullableInt8(PreparedStatement ps, int idx, ValueSupplier<String> supplier,
+            String table, String column) throws SQLException {
+        String raw = safeGet(supplier, table, column);
+        Byte value = null;
+        if (raw != null && !raw.trim().isEmpty()) {
+            try {
+                value = new BigDecimal(raw.trim()).byteValueExact();
+            } catch (NumberFormatException | ArithmeticException e) {
+                value = null;
+            }
+            if (value == null) warnUnparseable(table, column);
+        }
+        if (value != null) ps.setByte(idx, value);
+        else               ps.setNull(idx, Types.TINYINT);
+    }
+
+    private static void warnUnparseable(String table, String column) {
+        if (warned.add(table + "." + column + "#parse")) {
+            log.warn("field '{}' has a non-numeric/out-of-range value for {}, storing NULL", column, table);
+        }
     }
 
     private static <T> T safeGet(ValueSupplier<T> supplier, String table, String column) {

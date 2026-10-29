@@ -18,6 +18,7 @@ import in.codifi.clickhouse.logs.fallback.FallbackManager;
 import in.codifi.clickhouse.logs.fallback.LogType;
 import in.codifi.clickhouse.logs.model.AccessLogModel;
 import in.codifi.clickhouse.logs.model.EmailLogModel;
+import in.codifi.clickhouse.logs.model.OrderDetailModel;
 import in.codifi.clickhouse.logs.model.RestAccessLogModel;
 import in.codifi.clickhouse.logs.model.SmsLogModel;
 import in.codifi.clickhouse.logs.model.UserLoginReportModel;
@@ -42,6 +43,7 @@ public class AccessLogBatchService {
     private final AtomicBoolean flushingLoginReport  = new AtomicBoolean(false);
     private final AtomicBoolean flushingEmailLog     = new AtomicBoolean(false);
     private final AtomicBoolean flushingSmsLog       = new AtomicBoolean(false);
+    private final AtomicBoolean flushingOrderDetail  = new AtomicBoolean(false);
 
     // Retry buffers (guarded by their own monitor)
     private final Deque<FailedBatch<RestAccessLogModel>>   restRetry        = new ArrayDeque<>();
@@ -49,11 +51,13 @@ public class AccessLogBatchService {
     private final Deque<FailedBatch<UserLoginReportModel>> loginReportRetry = new ArrayDeque<>();
     private final Deque<FailedBatch<EmailLogModel>>        emailRetry       = new ArrayDeque<>();
     private final Deque<FailedBatch<SmsLogModel>>          smsRetry         = new ArrayDeque<>();
+    private final Deque<FailedBatch<OrderDetailModel>>     orderRetry       = new ArrayDeque<>();
     private long restRetryBytes        = 0L;
     private long accessRetryBytes      = 0L;
     private long loginReportRetryBytes = 0L;
     private long emailRetryBytes       = 0L;
     private long smsRetryBytes         = 0L;
+    private long orderRetryBytes       = 0L;
 
     // ---- constructors ----
 
@@ -101,6 +105,8 @@ public class AccessLogBatchService {
         scheduler.scheduleAtFixedRate(this::scheduledFlushEmailLog,
                 flushIntervalSeconds, flushIntervalSeconds, TimeUnit.SECONDS);
         scheduler.scheduleAtFixedRate(this::scheduledFlushSmsLog,
+                flushIntervalSeconds, flushIntervalSeconds, TimeUnit.SECONDS);
+        scheduler.scheduleAtFixedRate(this::scheduledFlushOrderDetail,
                 flushIntervalSeconds, flushIntervalSeconds, TimeUnit.SECONDS);
     }
 
@@ -168,6 +174,18 @@ public class AccessLogBatchService {
                     || cache.smsQueueBytes >= maxBatchBytes;
         }
         if (shouldFlush) flushSmsLog();
+    }
+
+    public void addOrderDetail(OrderDetailModel model) {
+        long entryBytes = estimateOrderDetailBytes(model);
+        boolean shouldFlush;
+        synchronized (cache) {
+            cache.getOrderDetailBatchList().add(model);
+            cache.orderQueueBytes += entryBytes;
+            shouldFlush = cache.getOrderDetailBatchList().size() >= batchSize
+                    || cache.orderQueueBytes >= maxBatchBytes;
+        }
+        if (shouldFlush) flushOrderDetail();
     }
 
     // ---- flush: REST access log ----
@@ -375,6 +393,47 @@ public class AccessLogBatchService {
         });
     }
 
+    // ---- flush: order details ----
+
+    public void flushOrderDetail() {
+        if (!flushingOrderDetail.compareAndSet(false, true)) return;
+
+        List<OrderDetailModel> copy;
+        long copyBytes;
+        synchronized (cache) {
+            List<OrderDetailModel> list = cache.getOrderDetailBatchList();
+            if (list.isEmpty()) {
+                flushingOrderDetail.set(false);
+                return;
+            }
+            copy = new ArrayList<>(list);
+            copyBytes = cache.orderQueueBytes;
+            list.clear();
+            cache.orderQueueBytes = 0L;
+        }
+
+        pool.execute(() -> {
+            try {
+                drainOrderRetry();
+                manager.insertOrderDetailBatch(orderDetailTable(), copy);
+            } catch (Exception e) {
+                if (fallback == null) {
+                    log.error("flushOrderDetail() failed — buffering {} order entries ({} bytes) ({})",
+                            copy.size(), copyBytes, AccessLogWriter.errorType(e));
+                    addToOrderRetry(copy, copyBytes);
+                } else {
+                    // Order details are never written to the per-row outage INFO stream.
+                    log.error("flushOrderDetail() failed — routing {} order entries ({} bytes) to fallback ({})",
+                            copy.size(), copyBytes, AccessLogWriter.errorType(e));
+                    List<OrderDetailModel> left = fallback.offer(LogType.ORDER, copy);
+                    if (!left.isEmpty()) addToOrderRetry(left, left == copy ? copyBytes : orderDetailBytes(left));
+                }
+            } finally {
+                flushingOrderDetail.set(false);
+            }
+        });
+    }
+
     // ---- scheduled callbacks ----
 
     private void scheduledFlush() {
@@ -411,6 +470,13 @@ public class AccessLogBatchService {
             if (cache.getSmsLogBatchList().isEmpty()) return;
         }
         flushSmsLog();
+    }
+
+    private void scheduledFlushOrderDetail() {
+        synchronized (cache) {
+            if (cache.getOrderDetailBatchList().isEmpty()) return;
+        }
+        flushOrderDetail();
     }
 
     // ---- retry buffer helpers ----
@@ -510,6 +576,25 @@ public class AccessLogBatchService {
         }
     }
 
+    private void drainOrderRetry() {
+        List<FailedBatch<OrderDetailModel>> pending;
+        synchronized (orderRetry) {
+            if (orderRetry.isEmpty()) return;
+            pending = new ArrayList<>(orderRetry);
+            orderRetry.clear();
+            orderRetryBytes = 0L;
+        }
+        for (FailedBatch<OrderDetailModel> batch : pending) {
+            try {
+                manager.insertOrderDetailBatch(orderDetailTable(), batch.entries);
+            } catch (Exception e) {
+                log.error("Retry flush failed for {} order entries ({} bytes) ({})",
+                        batch.entries.size(), batch.bytes, AccessLogWriter.errorType(e));
+                addToOrderRetry(batch.entries, batch.bytes);
+            }
+        }
+    }
+
     private void addToRestRetry(List<RestAccessLogModel> entries, long bytes) {
         synchronized (restRetry) {
             restRetry.addLast(new FailedBatch<>(entries, bytes));
@@ -575,6 +660,19 @@ public class AccessLogBatchService {
         }
     }
 
+    private void addToOrderRetry(List<OrderDetailModel> entries, long bytes) {
+        synchronized (orderRetry) {
+            orderRetry.addLast(new FailedBatch<>(entries, bytes));
+            orderRetryBytes += bytes;
+            while (orderRetryBytes > retryBufferMaxBytes && !orderRetry.isEmpty()) {
+                FailedBatch<OrderDetailModel> oldest = orderRetry.pollFirst();
+                orderRetryBytes -= oldest.bytes;
+                log.warn("Order retry buffer over cap ({} bytes) — dropped {} entries ({} bytes)",
+                        retryBufferMaxBytes, oldest.entries.size(), oldest.bytes);
+            }
+        }
+    }
+
     // ---- table names ----
 
     private String restTable()        { return database + ".tbl_rest_access_log"; }
@@ -582,6 +680,7 @@ public class AccessLogBatchService {
     private String loginReportTable() { return database + ".tbl_user_loggedin_report"; }
     private String emailLogTable()    { return database + ".tbl_email_logs"; }
     private String smsLogTable()      { return database + ".tbl_sms_logs"; }
+    private String orderDetailTable() { return database + ".tbl_order_details"; }
 
     // ---- byte estimation ----
 
@@ -640,6 +739,30 @@ public class AccessLogBatchService {
                 + len(m.getCreatedBy()) + len(m.getSource()) + len(m.getFiller());
     }
 
+    private static long orderDetailBytes(List<OrderDetailModel> list) {
+        long total = 0L;
+        for (OrderDetailModel m : list) total += estimateOrderDetailBytes(m);
+        return total;
+    }
+
+    private static long estimateOrderDetailBytes(OrderDetailModel m) {
+        return len(m.getUserId()) + len(m.getAccId()) + len(m.getUser()) + len(m.getToken())
+                + len(m.getExchange()) + len(m.getTradingSymbol()) + len(m.getAction())
+                + len(m.getTransType()) + len(m.getProduct()) + len(m.getValidity()) + len(m.getPrcType())
+                + len(m.getOrderType()) + len(m.getCustomerFirm()) + len(m.getQty()) + len(m.getPrice())
+                + len(m.getTriggerPrice()) + len(m.getDiscQty()) + len(m.getCancelledSize())
+                + len(m.getMktProtectionPrice()) + len(m.getOrderNo()) + len(m.getTarget())
+                + len(m.getStopLossValue()) + len(m.getTrailingStopLoss()) + len(m.getTickSize())
+                + len(m.getLtpOrAtp()) + len(m.getSqrOffAbsOrTick()) + len(m.getSlabsOrTick())
+                + len(m.getTrailTickYesNo()) + len(m.getClassification()) + len(m.getVendorCode())
+                + len(m.getFlagToAddCategory()) + len(m.getOrderCriteria()) + len(m.getPosSqrOffFlag())
+                + len(m.getAlgoId()) + len(m.getOrderTag()) + len(m.getComments()) + len(m.getSource())
+                + len(m.getMethod()) + len(m.getModule()) + len(m.getDeviceIp()) + len(m.getDeviceId())
+                + len(m.getStatus()) + len(m.getRejReason()) + len(m.getCreatedBy())
+                + len(m.getActiveStatus()) + len(m.getAppCode()) + len(m.getSourcePlatform())
+                + len(m.getFiller1()) + len(m.getFiller2()) + len(m.getFiller3()) + len(m.getFiller4());
+    }
+
     private static long len(String s) {
         return s != null ? s.length() : 0L;
     }
@@ -657,6 +780,7 @@ public class AccessLogBatchService {
         flushLoginReport();
         flushEmailLog();
         flushSmsLog();
+        flushOrderDetail();
         pool.shutdown();
         try {
             if (!pool.awaitTermination(30, TimeUnit.SECONDS)) {

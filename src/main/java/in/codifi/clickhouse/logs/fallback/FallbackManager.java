@@ -28,6 +28,7 @@ import org.slf4j.LoggerFactory;
 import in.codifi.clickhouse.logs.AccessLogWriter;
 import in.codifi.clickhouse.logs.model.AccessLogModel;
 import in.codifi.clickhouse.logs.model.EmailLogModel;
+import in.codifi.clickhouse.logs.model.OrderDetailModel;
 import in.codifi.clickhouse.logs.model.RestAccessLogModel;
 import in.codifi.clickhouse.logs.model.SmsLogModel;
 import in.codifi.clickhouse.logs.model.UserLoginReportModel;
@@ -74,6 +75,7 @@ public final class FallbackManager {
     private final String loginTable;
     private final String emailTable;
     private final String smsTable;
+    private final String orderTable;
 
     private final AtomicLong    sizeBytes = new AtomicLong(0L);
     private final AtomicLong    counter   = new AtomicLong(0L);
@@ -105,6 +107,7 @@ public final class FallbackManager {
         this.loginTable  = database + ".tbl_user_loggedin_report";
         this.emailTable  = database + ".tbl_email_logs";
         this.smsTable    = database + ".tbl_sms_logs";
+        this.orderTable  = database + ".tbl_order_details";
 
         this.pid = currentPid();
         if (cfg.getInstanceName() != null) {
@@ -343,6 +346,7 @@ public final class FallbackManager {
             case REST:   w.insertRestAccessLogBatch(restTable, (List<RestAccessLogModel>) d.rows); break;
             case EMAIL:  w.insertEmailLogBatch(emailTable, (List<EmailLogModel>) d.rows);           break;
             case SMS:    w.insertSmsLogBatch(smsTable, (List<SmsLogModel>) d.rows);                 break;
+            case ORDER:  w.insertOrderDetailBatch(orderTable, (List<OrderDetailModel>) d.rows);     break;
             default:     w.insertLoginReportBatch(loginTable, (List<UserLoginReportModel>) d.rows); break;
         }
     }
@@ -410,6 +414,7 @@ public final class FallbackManager {
         switch (type) {
             case ACCESS: module = ((AccessLogModel) row).getModule();     break;
             case REST:   module = ((RestAccessLogModel) row).getModule(); break;
+            case ORDER:  module = ((OrderDetailModel) row).getModule();   break;
             default:     module = null;                                   break; // login/email/sms rows have no module
         }
         return sanitize(module);

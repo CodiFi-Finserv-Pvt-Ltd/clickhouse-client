@@ -14,6 +14,7 @@ import org.json.simple.parser.JSONParser;
 
 import in.codifi.clickhouse.logs.model.AccessLogModel;
 import in.codifi.clickhouse.logs.model.EmailLogModel;
+import in.codifi.clickhouse.logs.model.OrderDetailModel;
 import in.codifi.clickhouse.logs.model.RestAccessLogModel;
 import in.codifi.clickhouse.logs.model.SmsLogModel;
 import in.codifi.clickhouse.logs.model.UserLoginReportModel;
@@ -68,6 +69,7 @@ final class FallbackCodec {
                 case REST:   o = encodeRest((RestAccessLogModel) row, bodyMapper); break;
                 case EMAIL:  o = encodeEmail((EmailLogModel) row);                 break;
                 case SMS:    o = encodeSms((SmsLogModel) row);                     break;
+                case ORDER:  o = encodeOrder((OrderDetailModel) row);              break;
                 default:     o = encodeLogin((UserLoginReportModel) row);          break;
             }
             sb.append(o.toJSONString()).append('\n');
@@ -181,6 +183,63 @@ final class FallbackCodec {
         return o;
     }
 
+    @SuppressWarnings("unchecked")
+    private static JSONObject encodeOrder(OrderDetailModel m) {
+        JSONObject o = new JSONObject();
+        o.put("userId", m.getUserId());
+        o.put("accId", m.getAccId());
+        o.put("user", m.getUser());
+        o.put("token", m.getToken());
+        o.put("exchange", m.getExchange());
+        o.put("tradingSymbol", m.getTradingSymbol());
+        o.put("action", m.getAction());
+        o.put("transType", m.getTransType());
+        o.put("product", m.getProduct());
+        o.put("validity", m.getValidity());
+        o.put("prcType", m.getPrcType());
+        o.put("orderType", m.getOrderType());
+        o.put("customerFirm", m.getCustomerFirm());
+        o.put("qty", m.getQty());
+        o.put("price", m.getPrice());
+        o.put("triggerPrice", m.getTriggerPrice());
+        o.put("discQty", m.getDiscQty());
+        o.put("cancelledSize", m.getCancelledSize());
+        o.put("mktProtectionPrice", m.getMktProtectionPrice());
+        o.put("orderNo", m.getOrderNo());
+        o.put("target", m.getTarget());
+        o.put("stopLossValue", m.getStopLossValue());
+        o.put("trailingStopLoss", m.getTrailingStopLoss());
+        o.put("tickSize", m.getTickSize());
+        o.put("ltpOrAtp", m.getLtpOrAtp());
+        o.put("sqrOffAbsOrTick", m.getSqrOffAbsOrTick());
+        o.put("slabsOrTick", m.getSlabsOrTick());
+        o.put("trailTickYesNo", m.getTrailTickYesNo());
+        o.put("classification", m.getClassification());
+        o.put("vendorCode", m.getVendorCode());
+        o.put("flagToAddCategory", m.getFlagToAddCategory());
+        o.put("orderCriteria", m.getOrderCriteria());
+        o.put("posSqrOffFlag", m.getPosSqrOffFlag());
+        o.put("algoId", m.getAlgoId());
+        o.put("orderTag", m.getOrderTag());
+        o.put("comments", m.getComments());
+        o.put("source", m.getSource());
+        o.put("method", m.getMethod());
+        o.put("module", m.getModule());
+        o.put("deviceIp", m.getDeviceIp());
+        o.put("deviceId", m.getDeviceId());
+        o.put("status", m.getStatus());
+        o.put("rejReason", m.getRejReason());
+        o.put("createdBy", m.getCreatedBy());
+        o.put("activeStatus", m.getActiveStatus());
+        o.put("appCode", m.getAppCode());
+        o.put("sourcePlatform", m.getSourcePlatform());
+        o.put("filler1", m.getFiller1());
+        o.put("filler2", m.getFiller2());
+        o.put("filler3", m.getFiller3());
+        o.put("filler4", m.getFiller4());
+        return o;
+    }
+
     // ---- decode ----
 
     /** Throws on any malformed content; the caller quarantines the file. */
@@ -209,6 +268,7 @@ final class FallbackCodec {
                     case REST:   rows.add(decodeRest(o));   break;
                     case EMAIL:  rows.add(decodeEmail(o));  break;
                     case SMS:    rows.add(decodeSms(o));    break;
+                    case ORDER:  rows.add(decodeOrder(o));  break;
                     default:     rows.add(decodeLogin(o));  break;
                 }
             }
@@ -308,6 +368,62 @@ final class FallbackCodec {
         m.setCreatedBy(str(o, "createdBy"));
         m.setSource(str(o, "source"));
         m.setFiller(str(o, "filler"));
+        return m;
+    }
+
+    private static OrderDetailModel decodeOrder(JSONObject o) {
+        OrderDetailModel m = new OrderDetailModel();
+        m.setUserId(str(o, "userId"));
+        m.setAccId(str(o, "accId"));
+        m.setUser(str(o, "user"));
+        m.setToken(str(o, "token"));
+        m.setExchange(str(o, "exchange"));
+        m.setTradingSymbol(str(o, "tradingSymbol"));
+        m.setAction(str(o, "action"));
+        m.setTransType(str(o, "transType"));
+        m.setProduct(str(o, "product"));
+        m.setValidity(str(o, "validity"));
+        m.setPrcType(str(o, "prcType"));
+        m.setOrderType(str(o, "orderType"));
+        m.setCustomerFirm(str(o, "customerFirm"));
+        m.setQty(str(o, "qty"));
+        m.setPrice(str(o, "price"));
+        m.setTriggerPrice(str(o, "triggerPrice"));
+        m.setDiscQty(str(o, "discQty"));
+        m.setCancelledSize(str(o, "cancelledSize"));
+        m.setMktProtectionPrice(str(o, "mktProtectionPrice"));
+        m.setOrderNo(str(o, "orderNo"));
+        m.setTarget(str(o, "target"));
+        m.setStopLossValue(str(o, "stopLossValue"));
+        m.setTrailingStopLoss(str(o, "trailingStopLoss"));
+        m.setTickSize(str(o, "tickSize"));
+        m.setLtpOrAtp(str(o, "ltpOrAtp"));
+        m.setSqrOffAbsOrTick(str(o, "sqrOffAbsOrTick"));
+        m.setSlabsOrTick(str(o, "slabsOrTick"));
+        m.setTrailTickYesNo(str(o, "trailTickYesNo"));
+        m.setClassification(str(o, "classification"));
+        m.setVendorCode(str(o, "vendorCode"));
+        m.setFlagToAddCategory(str(o, "flagToAddCategory"));
+        m.setOrderCriteria(str(o, "orderCriteria"));
+        m.setPosSqrOffFlag(str(o, "posSqrOffFlag"));
+        m.setAlgoId(str(o, "algoId"));
+        m.setOrderTag(str(o, "orderTag"));
+        m.setComments(str(o, "comments"));
+        m.setSource(str(o, "source"));
+        m.setMethod(str(o, "method"));
+        m.setModule(str(o, "module"));
+        m.setDeviceIp(str(o, "deviceIp"));
+        m.setDeviceId(str(o, "deviceId"));
+        m.setStatus(str(o, "status"));
+        m.setRejReason(str(o, "rejReason"));
+        m.setCreatedBy(str(o, "createdBy"));
+        m.setActiveStatus(str(o, "activeStatus"));
+        m.setAppCode(str(o, "appCode"));
+        m.setSourcePlatform(str(o, "sourcePlatform"));
+        m.setFiller1(str(o, "filler1"));
+        m.setFiller2(str(o, "filler2"));
+        m.setFiller3(str(o, "filler3"));
+        m.setFiller4(str(o, "filler4"));
         return m;
     }
 

@@ -12,6 +12,7 @@ import org.slf4j.LoggerFactory;
 
 import in.codifi.clickhouse.logs.model.AccessLogModel;
 import in.codifi.clickhouse.logs.model.EmailLogModel;
+import in.codifi.clickhouse.logs.model.OrderDetailModel;
 import in.codifi.clickhouse.logs.model.RestAccessLogModel;
 import in.codifi.clickhouse.logs.model.SmsLogModel;
 import in.codifi.clickhouse.logs.model.UserLoginReportModel;
@@ -394,6 +395,111 @@ public class AccessLogWriter {
         SafeBind.bindNullableString(ps, i++, entry::getCreatedBy, tableName, "created_by");          //  8
         SafeBind.bindNullableString(ps, i++, entry::getSource, tableName, "source");                 //  9
         SafeBind.bindNullableString(ps, i++, entry::getFiller, tableName, "filler");                 // 10
+    }
+
+    // -----------------------------------------------------------------
+    // tbl_order_details  — 51 INSERT cols; created_on defaults in ClickHouse
+    //
+    // All model fields are String. Decimal(18,6) / Int8 columns are parsed by
+    // SafeBind; a null/blank/unparseable/out-of-range value binds as NULL.
+    // Column list is backtick-quoted (contains `user`).
+    // -----------------------------------------------------------------
+    public void insertOrderDetailBatch(String tableName, List<OrderDetailModel> logs) {
+        if (logs == null || logs.isEmpty()) return;
+
+        String query = "INSERT INTO " + tableName
+                + " (`user_id`, `acc_id`, `user`, `token`, `exchange`, `trading_symbol`, `action`,"
+                + " `trans_type`, `product`, `validity`, `prc_type`, `order_type`, `customer_firm`,"
+                + " `qty`, `price`, `trigger_price`, `disc_qty`, `cancelled_size`, `mkt_protection_price`,"
+                + " `order_no`, `target`, `stop_loss_value`, `trailing_stop_loss`, `tick_size`,"
+                + " `ltp_or_atp`, `sqr_off_abs_or_tick`, `slabs_or_tick`, `trail_tick_yes_no`,"
+                + " `classification`, `vendor_code`, `flag_to_add_category`, `order_criteria`,"
+                + " `pos_sqr_off_flag`, `algo_id`, `order_tag`, `comments`, `source`, `method`, `module`,"
+                + " `device_ip`, `device_id`, `status`, `rej_reason`, `active_status`,"
+                + " `created_by`, `app_code`, `source_platform`, `filler1`, `filler2`, `filler3`, `filler4`)"
+                + " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)";
+
+        try (Connection conn = ds.getConnection(); PreparedStatement ps = conn.prepareStatement(query)) {
+
+            int failedRows = 0;
+            for (OrderDetailModel entry : logs) {
+                try {
+                    bindOrderDetailRow(ps, tableName, entry);
+                    ps.addBatch();
+                } catch (Exception rowEx) {
+                    failedRows++;
+                    log.warn("Skipping unmappable row for {} ({})", tableName, errorType(rowEx));
+                    log.debug("Unmappable row detail for {}", tableName, rowEx);
+                }
+            }
+            if (failedRows == logs.size()) {
+                throw new RuntimeException("All " + failedRows + " rows failed to bind for " + tableName);
+            }
+
+            ps.executeBatch();
+
+        } catch (Exception e) {
+            log.error("insertOrderDetailBatch failed for table {} — {} rows ({})",
+                    tableName, logs.size(), errorType(e));
+            log.debug("insertOrderDetailBatch failure detail for table {}", tableName, e);
+            throw new RuntimeException(e);
+        }
+    }
+
+    private void bindOrderDetailRow(PreparedStatement ps, String t, OrderDetailModel e) throws Exception {
+        int i = 1;
+        SafeBind.bindString(ps, i++, e::getUserId, t, "user_id");                                     //  1
+        SafeBind.bindNullableString(ps, i++, e::getAccId, t, "acc_id");                               //  2
+        SafeBind.bindNullableString(ps, i++, e::getUser, t, "user");                                  //  3
+        SafeBind.bindNullableString(ps, i++, e::getToken, t, "token");                                //  4
+        SafeBind.bindNullableString(ps, i++, e::getExchange, t, "exchange");                          //  5
+        SafeBind.bindNullableString(ps, i++, e::getTradingSymbol, t, "trading_symbol");               //  6
+        SafeBind.bindNullableString(ps, i++, e::getAction, t, "action");                              //  7
+        SafeBind.bindNullableString(ps, i++, e::getTransType, t, "trans_type");                       //  8
+        SafeBind.bindNullableString(ps, i++, e::getProduct, t, "product");                            //  9
+        SafeBind.bindNullableString(ps, i++, e::getValidity, t, "validity");                          // 10
+        SafeBind.bindNullableString(ps, i++, e::getPrcType, t, "prc_type");                           // 11
+        SafeBind.bindNullableString(ps, i++, e::getOrderType, t, "order_type");                       // 12
+        SafeBind.bindNullableString(ps, i++, e::getCustomerFirm, t, "customer_firm");                 // 13
+        SafeBind.bindNullableDecimal(ps, i++, e::getQty, t, "qty", 18, 6);                            // 14
+        SafeBind.bindNullableDecimal(ps, i++, e::getPrice, t, "price", 18, 6);                        // 15
+        SafeBind.bindNullableDecimal(ps, i++, e::getTriggerPrice, t, "trigger_price", 18, 6);         // 16
+        SafeBind.bindNullableDecimal(ps, i++, e::getDiscQty, t, "disc_qty", 18, 6);                   // 17
+        SafeBind.bindNullableDecimal(ps, i++, e::getCancelledSize, t, "cancelled_size", 18, 6);       // 18
+        SafeBind.bindNullableDecimal(ps, i++, e::getMktProtectionPrice, t, "mkt_protection_price", 18, 6); // 19
+        SafeBind.bindNullableString(ps, i++, e::getOrderNo, t, "order_no");                           // 20
+        SafeBind.bindNullableDecimal(ps, i++, e::getTarget, t, "target", 18, 6);                      // 21
+        SafeBind.bindNullableDecimal(ps, i++, e::getStopLossValue, t, "stop_loss_value", 18, 6);      // 22
+        SafeBind.bindNullableDecimal(ps, i++, e::getTrailingStopLoss, t, "trailing_stop_loss", 18, 6); // 23
+        SafeBind.bindNullableDecimal(ps, i++, e::getTickSize, t, "tick_size", 18, 6);                 // 24
+        SafeBind.bindNullableString(ps, i++, e::getLtpOrAtp, t, "ltp_or_atp");                        // 25
+        SafeBind.bindNullableString(ps, i++, e::getSqrOffAbsOrTick, t, "sqr_off_abs_or_tick");        // 26
+        SafeBind.bindNullableString(ps, i++, e::getSlabsOrTick, t, "slabs_or_tick");                  // 27
+        SafeBind.bindNullableString(ps, i++, e::getTrailTickYesNo, t, "trail_tick_yes_no");           // 28
+        SafeBind.bindNullableString(ps, i++, e::getClassification, t, "classification");              // 29
+        SafeBind.bindNullableString(ps, i++, e::getVendorCode, t, "vendor_code");                     // 30
+        SafeBind.bindNullableString(ps, i++, e::getFlagToAddCategory, t, "flag_to_add_category");     // 31
+        SafeBind.bindNullableString(ps, i++, e::getOrderCriteria, t, "order_criteria");               // 32
+        SafeBind.bindNullableString(ps, i++, e::getPosSqrOffFlag, t, "pos_sqr_off_flag");             // 33
+        SafeBind.bindNullableString(ps, i++, e::getAlgoId, t, "algo_id");                             // 34
+        SafeBind.bindNullableString(ps, i++, e::getOrderTag, t, "order_tag");                         // 35
+        SafeBind.bindNullableString(ps, i++, e::getComments, t, "comments");                          // 36
+        SafeBind.bindNullableString(ps, i++, e::getSource, t, "source");                              // 37
+        SafeBind.bindNullableString(ps, i++, e::getMethod, t, "method");                              // 38
+        SafeBind.bindNullableString(ps, i++, e::getModule, t, "module");                              // 39
+        SafeBind.bindNullableString(ps, i++, e::getDeviceIp, t, "device_ip");                         // 40
+        SafeBind.bindNullableString(ps, i++, e::getDeviceId, t, "device_id");                         // 41
+        SafeBind.bindNullableString(ps, i++, e::getStatus, t, "status");                              // 42
+        SafeBind.bindNullableString(ps, i++, e::getRejReason, t, "rej_reason");                       // 43
+        SafeBind.bindNullableInt8(ps, i++, e::getActiveStatus, t, "active_status");                   // 44
+        // created_on DEFAULT now() — skipped
+        SafeBind.bindNullableString(ps, i++, e::getCreatedBy, t, "created_by");                       // 45
+        SafeBind.bindNullableString(ps, i++, e::getAppCode, t, "app_code");                           // 46
+        SafeBind.bindNullableString(ps, i++, e::getSourcePlatform, t, "source_platform");             // 47
+        SafeBind.bindNullableString(ps, i++, e::getFiller1, t, "filler1");                            // 48
+        SafeBind.bindNullableString(ps, i++, e::getFiller2, t, "filler2");                            // 49
+        SafeBind.bindNullableString(ps, i++, e::getFiller3, t, "filler3");                            // 50
+        SafeBind.bindNullableString(ps, i++, e::getFiller4, t, "filler4");                            // 51
     }
 
     /**
